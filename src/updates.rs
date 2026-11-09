@@ -40,7 +40,6 @@ enum State {
 
 #[derive(Default)]
 pub struct Updates {
-    visible: bool,
     state: State,
     result: Option<mpsc::Receiver<State>>,
 }
@@ -123,7 +122,7 @@ impl Updates {
         });
     }
 
-    pub fn footer(&mut self, ui: &mut egui::Ui) {
+    pub fn footer(&self, ui: &mut egui::Ui) -> bool {
         let available = matches!(self.state, State::Available(_));
         let (color, hint) = if available {
             (crate::GREEN, "Update available · View changelog")
@@ -148,50 +147,25 @@ impl Updates {
                 egui::Stroke::new(1.25_f32, color),
             );
         }
-        if response
+        response
             .on_hover_cursor(egui::CursorIcon::PointingHand)
             .on_hover_text(hint)
             .clicked()
-        {
-            self.visible = true;
-        }
     }
 
-    pub fn show_history(&mut self, ctx: &egui::Context) {
-        if !self.visible {
-            return;
-        }
-        let modal = egui::Modal::new(egui::Id::new("changelog")).show(ctx, |ui| {
-            ui.set_width(480.0);
-            let close = ui
-                .horizontal(|ui| {
-                    ui.heading("Changelog");
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.button("×").on_hover_text("Close changelog").clicked()
-                    })
-                    .inner
-                })
-                .inner;
-            ui.horizontal(|ui| self.controls(ui));
-            egui::ScrollArea::vertical()
-                .max_height(ctx.screen_rect().height() * 0.65)
-                .show(ui, |ui| {
-                    if let State::Available(release) = &self.state {
-                        if !release.notes.trim().is_empty() {
-                            ui.collapsing(format!("What's New in v{}", release.version), |ui| {
-                                show_changelog(ui, &release.notes);
-                            });
-                        }
-                    }
-                    show_changelog(ui, CHANGELOG);
+    pub fn show_settings(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Changelog");
+        ui.horizontal(|ui| self.controls(ui));
+        if let State::Available(release) = &self.state {
+            if !release.notes.trim().is_empty() {
+                ui.collapsing(format!("What's New in v{}", release.version), |ui| {
+                    show_changelog(ui, &release.notes);
                 });
-            ui.separator();
-            ui.hyperlink_to("GitHub Releases", RELEASES);
-            close
-        });
-        if modal.inner || modal.should_close() {
-            self.visible = false;
+            }
         }
+        show_changelog(ui, CHANGELOG);
+        ui.separator();
+        ui.hyperlink_to("GitHub Releases", RELEASES);
     }
 
     fn start(
@@ -466,6 +440,7 @@ mod tests {
             state: State::Current,
             ..Default::default()
         };
+        let settings_open = std::cell::Cell::new(false);
         let frame = |updates: &mut Updates, events| {
             ctx.run(
                 egui::RawInput {
@@ -474,9 +449,13 @@ mod tests {
                 },
                 |ctx| {
                     egui::CentralPanel::default().show(ctx, |ui| {
-                        ui.horizontal(|ui| updates.footer(ui));
+                        if ui.horizontal(|ui| updates.footer(ui)).inner {
+                            settings_open.set(true);
+                        }
+                        if settings_open.get() {
+                            updates.show_settings(ui);
+                        }
                     });
-                    updates.show_history(ctx);
                 },
             )
         };
@@ -505,11 +484,10 @@ mod tests {
             matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text() == "Update")
         }));
         click(&mut updates, concat!("v", env!("CARGO_PKG_VERSION")));
-        assert!(updates.visible);
+        assert!(settings_open.get());
         click(&mut updates, "Update");
         assert!(matches!(updates.state, State::Current));
-        click(&mut updates, "×");
-        assert!(!updates.visible);
+        settings_open.set(false);
 
         updates.state = State::Available(Release {
             version: Version::new(1, 0, 0),
@@ -522,7 +500,7 @@ mod tests {
                 if stroke.color == crate::GREEN && from.x == to.x && from.y > to.y)
         }));
         click(&mut updates, concat!("v", env!("CARGO_PKG_VERSION")));
-        assert!(updates.visible);
+        assert!(settings_open.get());
         click(&mut updates, "Update to v1.0.0");
         assert!(matches!(updates.state, State::Installing));
     }

@@ -5,6 +5,7 @@ use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
 mod cluster_overview;
 mod kubernetes;
+mod kubeconfig_settings;
 mod workloads_overview;
 mod detail_metrics;
 #[cfg(target_os = "macos")]
@@ -346,10 +347,20 @@ struct Forward {
 
 #[derive(Clone)]
 struct Sample {stamp:u64,cpu:Option<f64>,memory:Option<f64>}
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SettingsPage {
+    Kubernetes,
+    Connections,
+    #[cfg(target_os = "macos")]
+    Updates,
+}
+
 struct Observatory {
     snapshot:Snapshot, demo:bool,page:String,namespace:String,search:String,
     cluster_overview: cluster_overview::Overview, selected:Option<Resource>, detail_tab:String,
-    connections:bool,contexts:Vec<Target>,context:String,exe:String,kubeconfig:String,
+    settings_page: Option<SettingsPage>, contexts:Vec<Target>,context:String,exe:String,kubeconfig:String,
+    kubeconfig_settings: kubeconfig_settings::KubeconfigSettings,
+    synced_contexts: Vec<Target>,
     tx:mpsc::Sender<Reply>,rx:mpsc::Receiver<Reply>,busy:bool,last_refresh:Instant,
     output:String,command:String,console:bool,notice:String,confirm:Option<Action>,replicas:u32,
     target: Option<Target>,
@@ -386,9 +397,11 @@ impl Observatory {
         let (tx, rx) = mpsc::channel();
         let demo = shot.is_some() && target.is_none();
         let snapshot = if demo { self::demo() } else { Snapshot::default() };
-        let table_widths_dir = shot.is_none().then(table_widths_dir).flatten();
+        let settings_dir = shot.is_none().then(app_config_dir).flatten();
+        let table_widths_dir = settings_dir.as_ref().map(|dir| dir.join("column-widths"));
         let table_widths = table_widths_dir.as_deref().map(read_table_widths).unwrap_or_default();
-        let mut app = Self{snapshot,demo,page:"Overview".into(),namespace:if demo { ALL_NAMESPACES.into() } else { String::new() },search:String::new(),cluster_overview: Default::default(),selected:None,detail_tab:"Details".into(),connections:false,contexts:vec![],context:String::new(),exe:default_kubectl(),kubeconfig:String::new(),tx,rx,busy:false,last_refresh:Instant::now(),output:String::new(),command:"get pods -A".into(),console:false,notice:String::new(),confirm:None,replicas:2,shot,frames:0,shot_requested:false,nav_open:HashMap::new(),
+        let kubeconfig_settings = kubeconfig_settings::KubeconfigSettings::load(settings_dir);
+        let mut app = Self{snapshot,demo,page:"Overview".into(),namespace:if demo { ALL_NAMESPACES.into() } else { String::new() },search:String::new(),cluster_overview: Default::default(),selected:None,detail_tab:"Details".into(),settings_page:None,contexts:vec![],context:String::new(),exe:default_kubectl(),kubeconfig:String::new(),tx,rx,busy:false,last_refresh:Instant::now(),output:String::new(),command:"get pods -A".into(),console:false,notice:String::new(),confirm:None,replicas:2,shot,frames:0,shot_requested:false,nav_open:HashMap::new(),
             target: None, fetch_cancel: None, repaint: cc.egui_ctx.clone(), visualize: Default::default(), detail_metrics: Default::default(), manifest: None, container: String::new(),
             #[cfg(target_os = "macos")]
             process_usage: Default::default(),
@@ -397,6 +410,7 @@ impl Observatory {
             pod_logs: None, forwards: Vec::new(), local_port: 8080, remote_port: 80,
             table_sort: HashMap::new(),
             table_widths, table_widths_dir, pending_table_width: None,
+            kubeconfig_settings, synced_contexts: Vec::new(),
         };
         if demo { app.cluster_overview.record(&app.snapshot); }
         if let Some(target) = target {
@@ -414,14 +428,21 @@ impl Observatory {
         app
     }
     fn discover(&mut self, connect_current: bool) {
-        let target = Target { exe: self.exe.trim().into(), config: self.kubeconfig.trim().into(), context: String::new() };
+        self.discover_source(self.kubeconfig.trim().to_owned(), connect_current);
+    }
+
+    fn discover_source(&mut self, config: String, connect_current: bool) {
+        let target = Target { exe: self.exe.trim().into(), config, context: String::new() };
+        let sources = self.kubeconfig_settings.sources();
         self.busy = true;
         self.notice = "Scanning local kubeconfigs…".into();
         let tx = self.tx.clone();
+        let repaint = self.repaint.clone();
         std::thread::spawn(move || {
             let source = target.config.clone();
-            let discovered = LocalContexts::discover(target);
+            let discovered = LocalContexts::discover(target, &sources);
             let _ = tx.send(Reply::Contexts { discovered, connect_current, source });
+            repaint.request_repaint();
         });
     }
 
@@ -440,8 +461,13 @@ impl Observatory {
     }
 
     fn switch(&mut self, target: Option<Target>) {
+        let demo = target.is_none();
+        self.switch_workspace(target, demo);
+    }
+
+    fn switch_workspace(&mut self, target: Option<Target>, sample: bool) {
         if (self.busy && self.fetch_cancel.is_none())
-            || (self.target == target && (target.is_some() || self.demo)) { return; }
+            || (self.target == target && self.demo == sample) { return; }
         if let Some(cancelled) = self.fetch_cancel.take() {
             cancelled.store(true, Ordering::Relaxed);
             self.busy = false;
@@ -449,7 +475,7 @@ impl Observatory {
         if let Some(target) = &target {
             if !self.contexts.contains(target) { self.contexts.push(target.clone()); }
         }
-        self.demo = target.is_none();
+        self.demo = sample;
         self.target = target;
         self.snapshot = if self.demo { demo() } else { Snapshot::default() };
         self.cluster_overview.clear();
@@ -540,12 +566,24 @@ impl Observatory {
                 }
                 Reply::Contexts { discovered, connect_current, source } => {
                     let LocalContexts { entries, current, error } = discovered;
+                    let discovery_succeeded = error.is_none();
                     self.notice = error.unwrap_or_else(|| format!("{} local contexts found", entries.len()));
                     if let Some(current) = &current {
                         if self.context.is_empty() { self.context = current.context.clone(); }
                     }
                     if source.is_empty() {
+                        let active_removed = discovery_succeeded && self.target.as_ref().is_some_and(|active| {
+                            let same_source = |entry: &Target| entry.config == active.config && entry.context == active.context;
+                            self.synced_contexts.iter().any(same_source) && !entries.iter().any(same_source)
+                        });
+                        self.synced_contexts.clone_from(&entries);
                         self.contexts = entries;
+                        if active_removed {
+                            self.switch_workspace(None, false);
+                            self.context.clear();
+                            self.kubeconfig.clear();
+                            self.notice = "The active kubeconfig is no longer synced.".into();
+                        }
                     } else if !entries.is_empty() {
                         self.contexts.retain(|entry| entry.config != source);
                         self.contexts.extend(entries);
@@ -626,7 +664,8 @@ impl Observatory {
         ui.add_sized([270.0, 20.0], egui::Label::new(title).truncate()).on_hover_text(title);
         badge(ui,if self.demo{"SAMPLE DATA"}else if self.snapshot.loaded > 0 {"KUBERNETES"} else if self.busy {"CONNECTING"} else if self.target.is_none() {"DISCONNECTED"} else {"UNAVAILABLE"},if self.demo{ORANGE}else{BLUE});
         ui.with_layout(egui::Layout::right_to_left(Align::Center),|ui|{
-            if ui.button("Connections").clicked(){self.connections=true;}
+            if ui.selectable_label(self.settings_page.is_some(), "Settings").clicked(){self.settings_page=Some(SettingsPage::Kubernetes);}
+            if self.settings_page.is_some() { return; }
             if ui.add_enabled(self.target.is_some() && !self.namespace.is_empty() && !self.busy && self.manifest.is_none(), egui::Button::new("Apply YAML…")).clicked() {
                 self.manifest = Some(Manifest { yaml: String::new(), original: None, feedback: String::new() });
             }
@@ -647,8 +686,11 @@ impl Observatory {
                 .show(ui, |ui| self.cluster_sidebar(ui));
             ui.with_layout(egui::Layout::bottom_up(Align::Min),|ui|{
                 ui.add_space(8.0);
-                if nav_row(ui,"Cluster connections","cluster",0,false,None,None).clicked(){self.connections=true;}
-                if nav_row(ui,"Command panel","terminal",0,self.console,None,None).clicked(){self.console = !self.console;}
+                if nav_row(ui,"Cluster connections","cluster",0,self.settings_page==Some(SettingsPage::Connections),None,None).clicked(){self.settings_page=Some(SettingsPage::Connections);}
+                if nav_row(ui,"Command panel","terminal",0,self.console && self.settings_page.is_none(),None,None).clicked(){
+                    self.console = self.settings_page.is_some() || !self.console;
+                    self.settings_page = None;
+                }
                 ui.add_space(7.0);ui.separator();
             });
         });
@@ -681,8 +723,9 @@ impl Observatory {
                     .on_hover_text(tooltip).clicked()
             }).inner;
             if clicked {
+                let from_settings = self.settings_page.take().is_some();
                 if active {
-                    self.nav_open.insert("cluster", !expanded);
+                    self.nav_open.insert("cluster", from_settings || !expanded);
                 } else {
                     next = Some(target.clone());
                 }
@@ -735,8 +778,9 @@ impl Observatory {
         let count = kind.filter(|_| !self.namespace.is_empty() || !Self::page_uses_namespace(page)).map(|kind| {
             self.snapshot.kind(kind).into_iter().filter(|resource| self.in_namespace(&resource.namespace)).count()
         });
-        let response=nav_row(ui,label,icon,depth,self.page==page,count,None);
+        let response=nav_row(ui,label,icon,depth,self.settings_page.is_none() && self.page==page,count,None);
         if response.on_hover_text(label).clicked(){
+            self.settings_page = None;
             self.page=page.into();self.selected=None;self.search.clear();
         }
     }
@@ -998,7 +1042,7 @@ impl Observatory {
                 ui.label(if self.target.is_some() { "Loading resources from the cluster…" } else { "Scanning local kubeconfigs…" });
             } else {
                 ui.label(if self.target.is_some() { "Could not load cluster resources." } else { "Select a discovered context to connect." });
-                if ui.button("Connections").clicked() { self.connections = true; }
+                if ui.button("Connections").clicked() { self.settings_page = Some(SettingsPage::Connections); }
                 if let Some(error) = self.snapshot.errors.first() { ui.colored_label(ORANGE, error); }
             }
             return;
@@ -1262,91 +1306,159 @@ impl Observatory {
         if let Some(index) = remove { self.forwards.remove(index); }
     }
 
-    fn manifest_editor(&mut self, ctx: &egui::Context) {
+    fn manifest_editor(&mut self, ui: &mut egui::Ui) {
         let Some(manifest) = &mut self.manifest else { return };
-        let mut open = true;
         let mut submit = None;
         let readonly = manifest.original.as_ref().is_some_and(|original| original["kind"] == "Event");
         let context = self.target.as_ref().map_or("", |target| target.context.as_str());
-        egui::Window::new(if manifest.original.is_some() { "Resource YAML" } else { "Apply manifest" })
-            .open(&mut open).default_width(720.0).resizable(true).show(ctx, |ui| {
-                ui.label(format!("Context: {context}"));
-                egui::ScrollArea::both().max_height(480.0).show(ui, |ui| {
-                    ui.add(egui::TextEdit::multiline(&mut manifest.yaml).code_editor().desired_width(680.0)
-                        .desired_rows(18).interactive(!readonly && !self.busy)
-                        .hint_text("Paste Kubernetes YAML here"));
-                });
-                if !manifest.feedback.is_empty() { ui.label(&manifest.feedback); }
-                if readonly { return; }
-                let button = if manifest.original.is_some() { "Save changes…" } else { "Apply…" };
-                if ui.add_enabled(!self.busy && !manifest.yaml.trim().is_empty(), egui::Button::new(button)).clicked() {
-                    match manifest_request(manifest, &self.namespace) {
-                        Ok(request) => submit = Some(request),
-                        Err(error) => manifest.feedback = error,
-                    }
+        let close = ui.horizontal(|ui| {
+            ui.heading(if manifest.original.is_some() { "Resource YAML" } else { "Apply manifest" });
+            ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                ui.add_enabled(!self.busy, egui::Button::new("Back to Workspace")).clicked()
+            }).inner
+        }).inner;
+        ui.label(format!("Context: {context}"));
+        ui.separator();
+        if close {
+            self.manifest = None;
+            return;
+        }
+        let editor_height = (ui.available_height() - 65.0).max(160.0);
+        egui::ScrollArea::both().max_height(editor_height).show(ui, |ui| {
+            ui.add(egui::TextEdit::multiline(&mut manifest.yaml)
+                .code_editor().desired_width(f32::INFINITY).desired_rows(18)
+                .interactive(!readonly && !self.busy)
+                .hint_text("Paste Kubernetes YAML here"));
+        });
+        if !manifest.feedback.is_empty() { ui.label(&manifest.feedback); }
+        if !readonly {
+            let button = if manifest.original.is_some() { "Save changes…" } else { "Apply…" };
+            if ui.add_enabled(!self.busy && !manifest.yaml.trim().is_empty(), egui::Button::new(button)).clicked() {
+                match manifest_request(manifest, &self.namespace) {
+                    Ok(request) => submit = Some(request),
+                    Err(error) => manifest.feedback = error,
                 }
-            });
-        if !open && !self.busy { self.manifest = None; }
+            }
+        }
         if let Some((args, input)) = submit { self.queue(args, Some(input), OutputTo::ManifestSave); }
     }
 
-    fn connections(&mut self, ctx: &egui::Context) {
-        if !self.connections { return; }
-        let mut open = true;
-        egui::Window::new("Cluster connections").open(&mut open).default_width(500.0).collapsible(false).show(ctx, |ui| {
-            ui.label("Connect using your existing Kubernetes credentials.");
-            ui.label("Kubectl executable");
-            ui.add_enabled(!self.busy, egui::TextEdit::singleline(&mut self.exe));
-            ui.label("Kubeconfig path (optional)");
-            let config = ui.add_enabled(!self.busy, egui::TextEdit::singleline(&mut self.kubeconfig));
-            if config.changed() { self.context.clear(); }
-            ui.horizontal_wrapped(|ui| {
-                if ui.add_enabled(!self.busy, egui::Button::new("Scan local kubeconfigs")).clicked() {
-                    self.kubeconfig.clear();
-                    self.context.clear();
-                    self.discover(false);
-                }
-                if ui.add_enabled(!self.busy && !self.kubeconfig.trim().is_empty(), egui::Button::new("Read file")).clicked() {
-                    self.discover(false);
-                }
-            });
-            ui.label("Local contexts");
-            ui.add_enabled_ui(!self.busy, |ui| {
-                egui::ComboBox::from_id_salt("context-picker")
-                    .selected_text(if self.context.is_empty() { "Choose a context" } else { &self.context })
-                    .width(350.0).show_ui(ui, |ui| {
-                        for entry in &self.contexts {
-                            let source = if entry.config.is_empty() { "kubectl defaults" } else { &entry.config };
-                            let selected = self.context == entry.context && self.kubeconfig == entry.config;
-                            let label = if entry.config.is_empty() {
-                                entry.context.clone()
-                            } else {
-                                let file = std::path::Path::new(&entry.config).file_name().unwrap_or_default().to_string_lossy();
-                                format!("{}  ·  {}", entry.context, file)
-                            };
-                            if ui.selectable_label(selected, label).on_hover_text(source).clicked() {
-                                self.context = entry.context.clone();
-                                self.kubeconfig = entry.config.clone();
-                            }
-                        }
-                    });
-                ui.text_edit_singleline(&mut self.context);
-            });
-            ui.horizontal_wrapped(|ui| {
-                if ui.add_enabled(!self.busy && !self.context.trim().is_empty() && !self.exe.trim().is_empty(),
-                    egui::Button::new("Connect cluster").fill(BLUE)).clicked() {
-                    let target = Target { exe: self.exe.trim().into(), config: self.kubeconfig.trim().into(), context: self.context.trim().into() };
-                    if self.target.as_ref() == Some(&target) { self.start_fetch(); } else { self.switch(Some(target)); }
-                    self.connections = false;
-                }
-                if ui.add_enabled(!self.busy, egui::Button::new("Use sample workspace")).clicked() {
-                    self.switch(None);
-                    self.connections = false;
-                }
-            });
-            if !self.notice.is_empty() { ui.label(&self.notice); }
+    fn confirm_cluster_action(&mut self, ui: &mut egui::Ui, action: Action) {
+        ui.heading("Confirm cluster action");
+        ui.label(format!("Context: {}", action.target.context));
+        ui.separator();
+        egui::ScrollArea::horizontal().show(ui, |ui| {
+            ui.monospace(format!("kubectl {}", action.args.join(" ")));
         });
-        if !open { self.connections = false; }
+        if let Some(manifest) = &self.manifest {
+            if matches!(action.output_to, OutputTo::ManifestSave) {
+                egui::ScrollArea::both().max_height(360.0).show(ui, |ui| {
+                    ui.monospace(&manifest.yaml);
+                });
+            }
+        }
+        ui.horizontal(|ui| {
+            if ui.button("Cancel").clicked() {
+                self.confirm = None;
+            }
+            let can_run = !self.busy && self.target.as_ref() == Some(&action.target);
+            if ui.add_enabled(can_run, egui::Button::new("Run command")).clicked() {
+                self.confirm = None;
+                self.execute(action);
+            }
+        });
+    }
+
+    fn settings(&mut self, ui: &mut egui::Ui, page: SettingsPage) {
+        ui.horizontal(|ui| {
+            ui.heading("Settings");
+            ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                if ui.button("Back to Workspace").clicked() {
+                    self.settings_page = None;
+                }
+            });
+        });
+        ui.horizontal(|ui| {
+            for (tab, title) in [
+                (SettingsPage::Kubernetes, "Kubernetes"),
+                (SettingsPage::Connections, "Connections"),
+                #[cfg(target_os = "macos")]
+                (SettingsPage::Updates, "Updates"),
+            ] {
+                if ui.selectable_label(page == tab, title).clicked() {
+                    self.settings_page = Some(tab);
+                }
+            }
+        });
+        ui.separator();
+        let Some(page) = self.settings_page else { return };
+        egui::ScrollArea::vertical().id_salt("settings-content").show(ui, |ui| {
+            ui.set_max_width(740.0);
+            match page {
+                SettingsPage::Kubernetes => self.kubeconfig_settings.show(ui),
+                SettingsPage::Connections => self.connection_settings(ui),
+                #[cfg(target_os = "macos")]
+                SettingsPage::Updates => self.updates.show_settings(ui),
+            }
+        });
+    }
+
+    fn connection_settings(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Cluster Connections");
+        ui.label("Connect using your existing Kubernetes credentials.");
+        if ui.button("Manage Kubeconfigs…").clicked() {
+            self.settings_page = Some(SettingsPage::Kubernetes);
+        }
+        ui.label("Kubectl executable");
+        ui.add_enabled(!self.busy, egui::TextEdit::singleline(&mut self.exe));
+        ui.label("Kubeconfig path (optional)");
+        let config = ui.add_enabled(!self.busy, egui::TextEdit::singleline(&mut self.kubeconfig));
+        if config.changed() { self.context.clear(); }
+        ui.horizontal_wrapped(|ui| {
+            if ui.add_enabled(!self.busy, egui::Button::new("Scan local kubeconfigs")).clicked() {
+                self.kubeconfig.clear();
+                self.context.clear();
+                self.discover(false);
+            }
+            if ui.add_enabled(!self.busy && !self.kubeconfig.trim().is_empty(), egui::Button::new("Read file")).clicked() {
+                self.discover(false);
+            }
+        });
+        ui.label("Local contexts");
+        ui.add_enabled_ui(!self.busy, |ui| {
+            egui::ComboBox::from_id_salt("context-picker")
+                .selected_text(if self.context.is_empty() { "Choose a context" } else { &self.context })
+                .width(350.0).show_ui(ui, |ui| {
+                    for entry in &self.contexts {
+                        let source = if entry.config.is_empty() { "kubectl defaults" } else { &entry.config };
+                        let selected = self.context == entry.context && self.kubeconfig == entry.config;
+                        let label = if entry.config.is_empty() {
+                            entry.context.clone()
+                        } else {
+                            let file = std::path::Path::new(&entry.config).file_name().unwrap_or_default().to_string_lossy();
+                            format!("{}  ·  {}", entry.context, file)
+                        };
+                        if ui.selectable_label(selected, label).on_hover_text(source).clicked() {
+                            self.context = entry.context.clone();
+                            self.kubeconfig = entry.config.clone();
+                        }
+                    }
+                });
+            ui.text_edit_singleline(&mut self.context);
+        });
+        ui.horizontal_wrapped(|ui| {
+            if ui.add_enabled(!self.busy && !self.context.trim().is_empty() && !self.exe.trim().is_empty(),
+                egui::Button::new("Connect cluster").fill(BLUE)).clicked() {
+                let target = Target { exe: self.exe.trim().into(), config: self.kubeconfig.trim().into(), context: self.context.trim().into() };
+                if self.target.as_ref() == Some(&target) { self.start_fetch(); } else { self.switch(Some(target)); }
+                self.settings_page = None;
+            }
+            if ui.add_enabled(!self.busy, egui::Button::new("Use sample workspace")).clicked() {
+                self.switch(None);
+                self.settings_page = None;
+            }
+        });
+        if !self.notice.is_empty() { ui.label(&self.notice); }
     }
     fn console(&mut self,ctx:&egui::Context){if !self.console{return}egui::TopBottomPanel::bottom("console").resizable(true).default_height(215.0).frame(egui::Frame::new().fill(Color32::from_rgb(16,18,20)).inner_margin(13)).show(ctx,|ui|{
         ui.horizontal(|ui|{ui.label(RichText::new("KUBECTL COMMAND PANEL").strong().size(11.0));ui.label(RichText::new("Arguments only · no shell").color(MUTED).size(11.0));ui.with_layout(egui::Layout::right_to_left(Align::Center),|ui|{if ui.small_button("Close").clicked(){self.console=false;}if ui.small_button("Copy output").clicked(){ctx.copy_text(self.output.clone());}});});
@@ -1608,7 +1720,7 @@ impl ResourceColumn {
     }
 }
 
-fn table_widths_dir() -> Option<PathBuf> {
+fn app_config_dir() -> Option<PathBuf> {
     let home_dir = || std::env::var_os("HOME").filter(|path| !path.is_empty()).map(PathBuf::from);
     let base_dir = if cfg!(target_os = "macos") {
         home_dir().map(|dir| dir.join("Library").join("Application Support"))
@@ -1618,7 +1730,7 @@ fn table_widths_dir() -> Option<PathBuf> {
         std::env::var_os("XDG_CONFIG_HOME").filter(|path| !path.is_empty()).map(PathBuf::from)
             .or_else(|| home_dir().map(|dir| dir.join(".config")))
     };
-    base_dir.map(|dir| dir.join("Cluster Observatory").join("column-widths"))
+    base_dir.map(|dir| dir.join("Cluster Observatory"))
 }
 
 fn table_width_file(dir: &std::path::Path, kind: &str, column: ResourceColumn) -> PathBuf {
@@ -2142,6 +2254,12 @@ impl eframe::App for Observatory {
     }
 
     fn update(&mut self,ctx:&egui::Context,_frame:&mut eframe::Frame){self.poll();
+        if ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::Comma)) {
+            self.settings_page = if self.settings_page.is_some() { None } else { Some(SettingsPage::Kubernetes) };
+        }
+        if self.shot.is_none() && !self.busy && self.confirm.is_none() && self.manifest.is_none() && self.kubeconfig_settings.sync_due() {
+            self.discover_source(String::new(), false);
+        }
         #[cfg(target_os = "macos")]
         self.updates.poll(ctx);
         if self.shot.is_none()&&!self.demo&&!self.busy&&self.confirm.is_none()&&self.last_refresh.elapsed()>=Duration::from_secs(REFRESH){self.start_fetch();}
@@ -2153,7 +2271,7 @@ impl eframe::App for Observatory {
             .show(ctx, |ui| {
                 ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
                     #[cfg(target_os = "macos")]
-                    self.updates.footer(ui);
+                    if self.updates.footer(ui) { self.settings_page = Some(SettingsPage::Updates); }
                     #[cfg(target_os = "macos")]
                     ui.label(RichText::new(self.process_usage.label()).monospace().size(11.0).color(MUTED))
                         .on_hover_text("This app process · CPU is a recent average, with 100% equal to one core. RAM is resident memory.");
@@ -2171,43 +2289,29 @@ impl eframe::App for Observatory {
                     });
                 });
             });
-        self.console(ctx);
-        self.log_dock(ctx);
-        self.details(ctx);
+        if self.settings_page.is_none() && self.manifest.is_none() && self.confirm.is_none() {
+            self.console(ctx);
+            self.log_dock(ctx);
+            self.details(ctx);
+        }
+        if self.settings_page != Some(SettingsPage::Kubernetes) {
+            self.kubeconfig_settings.clear_draft();
+        }
         egui::CentralPanel::default().frame(egui::Frame::new().fill(BG).inner_margin(24)).show(ctx,|ui|{
-            if self.page == "Visualize" && !self.namespace.is_empty() {
+            if let Some(action) = self.confirm.clone() {
+                self.confirm_cluster_action(ui, action);
+            } else if let Some(page) = self.settings_page {
+                self.settings(ui, page);
+            } else if self.manifest.is_some() {
+                self.manifest_editor(ui);
+            } else if self.page == "Visualize" && !self.namespace.is_empty() {
                 self.workspace(ui);
             } else {
                 egui::ScrollArea::vertical().id_salt("main-scroll").show(ui, |ui| self.workspace(ui));
             }
         });
-        self.connections(ctx);
-        self.manifest_editor(ctx);
-        #[cfg(target_os = "macos")]
-        self.updates.show_history(ctx);
         if !ctx.input(|input| input.pointer.primary_down()) {
             self.save_pending_table_width();
-        }
-        if let Some(action) = self.confirm.clone() {
-            egui::Modal::new(egui::Id::new("confirm-action")).show(ctx, |ui| {
-                ui.heading("Confirm cluster action");
-                ui.label(format!("Context: {}", action.target.context));
-                ui.monospace(format!("kubectl {}", action.args.join(" ")));
-                if let Some(manifest) = &self.manifest {
-                    if matches!(action.output_to, OutputTo::ManifestSave) {
-                        egui::ScrollArea::both().max_height(280.0).max_width(600.0).show(ui, |ui| {
-                            ui.monospace(&manifest.yaml);
-                        });
-                    }
-                }
-                ui.horizontal(|ui| {
-                    if ui.button("Cancel").clicked() { self.confirm = None; }
-                    if ui.add_enabled(!self.busy && self.target.as_ref() == Some(&action.target), egui::Button::new("Run command")).clicked() {
-                        self.confirm = None;
-                        self.execute(action);
-                    }
-                });
-            });
         }
         if !self.busy { self.frames+=1; }
         if let Some(path)=&self.shot{
@@ -2221,7 +2325,7 @@ impl eframe::App for Observatory {
             ctx.request_repaint();
         } else {
             let quiet_overview = self.page == "Overview" && self.selected.is_none()
-                && !self.connections && !self.console && self.pod_logs.is_none()
+                && self.settings_page.is_none() && !self.console && self.pod_logs.is_none()
                 && self.manifest.is_none() && self.confirm.is_none() && self.forwards.is_empty()
                 && (!self.busy || self.fetch_cancel.is_some());
             let delay = if quiet_overview { Duration::from_secs(3) } else { Duration::from_millis(300) };

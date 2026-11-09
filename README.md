@@ -17,8 +17,8 @@ set the executable in **Connections** or pass `--kubectl` with `--context`.
 
 The app checks for updates on startup. A green version number with an up arrow
 in the footer means a newer release is available. Click the version number to
-open the changelog, check again, or install an update and reopen the app. The app
-must be in a location writable by your account to install updates.
+open **Settings → Updates**, see the changelog, check again, or install an update.
+The app must be in a location writable by your account to install updates.
 
 To build the disk image locally, install both Rust targets with
 `rustup target add aarch64-apple-darwin x86_64-apple-darwin` and run
@@ -43,10 +43,12 @@ On startup the app discovers contexts from kubectl's standard configuration
 standard configuration and reads its resources. Click any entry under
 **Local Kubeconfigs** in the sidebar to switch clusters and expand its resource
 menu. Select a namespace in the toolbar to view data for that cluster. You can
-also explicitly choose **All namespaces**. Open **Connections** to rescan local files. To add a file from another directory,
-enter its path and select **Read file**. When running a build outside the macOS
-app bundle, install kubectl separately. The sample workspace is available on
-demand from **Connections**.
+also explicitly choose **All namespaces**. Open **Settings → Kubernetes** to
+add a kubeconfig file, paste kubeconfig YAML, or sync a folder. The app remembers
+these sources and refreshes the sidebar as files are added, edited, or removed.
+Folder sync reads files directly in the selected folder. Open **Settings → Connections**
+for manual connections and the sample workspace. When running a build outside
+the macOS app bundle, install kubectl separately.
 
 You can also connect on launch:
 

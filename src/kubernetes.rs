@@ -1,7 +1,7 @@
 use std::{
     collections::HashSet,
     io::{BufRead, BufReader, Write},
-    path::{Path, PathBuf},
+    path::PathBuf,
     process::{Child, Command, Stdio},
     sync::{Arc, Mutex},
 };
@@ -128,7 +128,7 @@ pub struct LocalContexts {
 }
 
 impl LocalContexts {
-    pub fn discover(target: Target) -> Self {
+    pub fn discover(target: Target, sources: &[PathBuf]) -> Self {
         let home = std::env::var_os("HOME").map(PathBuf::from);
         let kube_dir = home.map(|home| home.join(".kube"));
         let mut loaded_paths = HashSet::new();
@@ -158,19 +158,13 @@ impl LocalContexts {
             Err(error) => result.error = Some(error),
         }
         if target.config.is_empty() {
-            if let Some(dir) = kube_dir {
-                result.scan_directory(&target.exe, &dir, &mut loaded_paths);
-            }
+            let paths = kube_dir.iter().chain(sources);
+            result.scan_files(&target.exe, config_files(paths), &mut loaded_paths);
         }
         result
     }
 
-    fn scan_directory(&mut self, exe: &str, dir: &Path, loaded_paths: &mut HashSet<PathBuf>) {
-        let Ok(files) = std::fs::read_dir(dir) else {
-            return;
-        };
-        let mut paths: Vec<_> = files.flatten().map(|file| file.path()).collect();
-        paths.sort();
+    fn scan_files(&mut self, exe: &str, paths: Vec<PathBuf>, loaded_paths: &mut HashSet<PathBuf>) {
         for path in paths {
             if !path.is_file()
                 || !path
@@ -192,6 +186,25 @@ impl LocalContexts {
             }
         }
     }
+}
+
+pub fn config_files<'a>(sources: impl IntoIterator<Item = &'a PathBuf>) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    for source in sources {
+        if source.is_file() {
+            paths.push(source.clone());
+        } else if let Ok(entries) = std::fs::read_dir(source) {
+            paths.extend(
+                entries
+                    .flatten()
+                    .map(|entry| entry.path())
+                    .filter(|path| path.is_file()),
+            );
+        }
+    }
+    paths.sort();
+    paths.dedup();
+    paths
 }
 
 fn read_contexts(source: &Target) -> Result<(String, Vec<Target>), String> {

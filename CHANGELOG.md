@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.10 · 2026-11-09
+
+- Added Kubernetes settings for adding or pasting kubeconfigs and syncing folders into the sidebar.
+- Moved Kubernetes settings, cluster connections, and updates into a full Settings page.
+- Moved the YAML editor and cluster action review into the workspace.
+
 ## 0.1.9 · 2026-11-09
 
 - Use the Cluster Observatory icon in the Dock while the app is running.
