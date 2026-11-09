@@ -10,6 +10,11 @@ Download the macOS disk image from [GitHub Releases](https://github.com/anuchonm
 open it, and drag **Cluster Observatory** into **Applications**. The same download
 supports Apple Silicon and Intel. The app is ad hoc signed and has not been notarized.
 
+The installer includes kubectl v1.36.6. Use your existing kubeconfig and install
+any credential helper it references, such as AWS CLI for EKS. Kubernetes supports
+kubectl within one minor version of the API server. For another client version,
+set the executable in **Connections** or pass `--kubectl` with `--context`.
+
 The app checks for updates on startup. A green version number with an up arrow
 in the footer means a newer release is available. Click the version number to
 open the changelog, check again, or install an update and reopen the app. The app
@@ -39,9 +44,9 @@ standard configuration and reads its resources. Click any entry under
 **Local Kubeconfigs** in the sidebar to switch clusters and expand its resource
 menu. Select a namespace in the toolbar to view data for that cluster. You can
 also explicitly choose **All namespaces**. Open **Connections** to rescan local files. To add a file from another directory,
-enter its path and select **Read file**. Kubectl must be installed and
-authenticated for the cluster. The sample workspace is available on demand
-from **Connections**.
+enter its path and select **Read file**. When running a build outside the macOS
+app bundle, install kubectl separately. The sample workspace is available on
+demand from **Connections**.
 
 You can also connect on launch:
 

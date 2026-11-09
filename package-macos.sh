@@ -32,6 +32,41 @@ rm -r "$iconset"
     -output "$app/Contents/MacOS/cluster-observatory"
 chmod 755 "$app/Contents/MacOS/cluster-observatory"
 
+# Package the official client for both Mac architectures and keep its license notices.
+kubectl_version=v1.36.6
+kubectl_cache="$PWD/target/kubectl-$kubectl_version"
+kubectl_release="https://dl.k8s.io/release/$kubectl_version"
+
+fetch_kubernetes_archive() {
+    local url="$1" destination="$2" expected="$3"
+    if [ -f "$destination" ] && printf '%s  %s\n' "$expected" "$destination" | /usr/bin/shasum -a 256 -c --status; then
+        return
+    fi
+    mkdir -p "$(dirname "$destination")"
+    /usr/bin/curl --disable -fsSL --proto '=https' --proto-redir '=https' \
+        --connect-timeout 10 --max-time 180 --retry 2 "$url" -o "$stage/kubernetes-download.tar.gz"
+    printf '%s  %s\n' "$expected" "$stage/kubernetes-download.tar.gz" | /usr/bin/shasum -a 256 -c
+    mv -f "$stage/kubernetes-download.tar.gz" "$destination"
+}
+
+stage_kubectl() {
+    local arch="$1" checksum="$2" archive="$kubectl_cache/$1/archive.tar.gz"
+    fetch_kubernetes_archive "$kubectl_release/kubernetes-client-darwin-$arch.tar.gz" "$archive" "$checksum"
+    /usr/bin/tar -xOzf "$archive" kubernetes/client/bin/kubectl > "$stage/kubectl-$arch"
+}
+
+stage_kubectl arm64 a47f775aebc96908f5e68332ae481ff5db18a4aae631e1fa6826b45b454da84a
+stage_kubectl amd64 5266f7fa1023528fb5812cd8b17152fed0c581e884585f1ed6157ab9ce46a82f
+/usr/bin/lipo -create "$stage/kubectl-arm64" "$stage/kubectl-amd64" -output "$app/Contents/MacOS/kubectl"
+rm "$stage/kubectl-arm64" "$stage/kubectl-amd64"
+chmod 755 "$app/Contents/MacOS/kubectl"
+/usr/bin/codesign --force --sign - "$app/Contents/MacOS/kubectl"
+
+fetch_kubernetes_archive "$kubectl_release/kubernetes-src.tar.gz" "$kubectl_cache/source.tar.gz" \
+    26e00690ead876ad5d2022c1e63d6b6ec0fbd59727e04f2d87ac0c58a734527c
+mkdir -p "$app/Contents/Resources/kubernetes"
+/usr/bin/tar -xzf "$kubectl_cache/source.tar.gz" -C "$app/Contents/Resources/kubernetes" LICENSES
+
 cat >"$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

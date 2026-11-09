@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.7 · 2026-11-09
+
+- Bundled kubectl v1.36.6 in the macOS installer for Apple Silicon and Intel.
+
 ## 0.1.6 · 2026-11-09
 
 - Fixed cluster connections when launching the macOS app from Applications by making Homebrew and Google Cloud credential helpers discoverable by kubectl.

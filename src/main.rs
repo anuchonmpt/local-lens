@@ -2235,6 +2235,15 @@ impl eframe::App for Observatory {
     }
 }
 fn default_kubectl() -> String {
+    #[cfg(target_os = "macos")]
+    if let Ok(executable) = std::env::current_exe() {
+        if let Some(bundle) = executable.ancestors().nth(3).filter(|path| path.extension().is_some_and(|ext| ext == "app")) {
+            let bundled = bundle.join("Contents/MacOS/kubectl");
+            if let Some(path) = bundled.to_str().filter(|_| bundled.is_file()) {
+                return path.into();
+            }
+        }
+    }
     if std::env::var_os("PATH").is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join("kubectl").is_file())) {
         return "kubectl".into();
     }
