@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.5 · 2026-11-09
+
+- Added a custom macOS app icon for Finder and the Dock.
+
 ## 0.1.4 · 2026-11-09
 
 - Moved Check and Update into the changelog, which opens from the version number in the footer.
