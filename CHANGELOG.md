@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.14 · 2026-11-09
+
+- Show each variable imported through envFrom on its own row, with a separate reveal button for every Secret key.
+
 ## 0.1.13 · 2026-11-09
 
 - Show revealed environment Secret values directly after the variable name, with the eye button at the end of the row.

@@ -1,26 +1,97 @@
 use crate::kubernetes::Target;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use eframe::egui;
-use serde_json::Value;
 use std::{collections::HashMap, sync::mpsc, thread};
 
-type SecretValues = Result<Vec<(String, String)>, String>;
-
-struct Reveal {
-    pending: mpsc::Receiver<SecretValues>,
-    value: Option<SecretValues>,
+struct Request<T> {
+    pending: mpsc::Receiver<Result<T, String>>,
+    value: Option<Result<T, String>>,
     seen: bool,
+}
+
+impl<T: Send + 'static> Request<T> {
+    fn start(
+        ctx: &egui::Context,
+        read: impl FnOnce() -> Result<T, String> + Send + 'static,
+    ) -> Self {
+        let (sender, pending) = mpsc::channel();
+        let ctx = ctx.clone();
+        thread::spawn(move || {
+            let _ = sender.send(read());
+            ctx.request_repaint();
+        });
+        Self {
+            pending,
+            value: None,
+            seen: true,
+        }
+    }
+
+    fn poll(&mut self) {
+        self.seen = true;
+        if self.value.is_none() {
+            match self.pending.try_recv() {
+                Ok(value) => self.value = Some(value),
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.value = Some(Err("Could not load Secret.".into()));
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+        }
+    }
 }
 
 #[derive(Default)]
 pub(super) struct EnvSecrets {
-    reveals: HashMap<egui::Id, Reveal>,
+    reveals: HashMap<egui::Id, Request<String>>,
+    key_lists: HashMap<egui::Id, Request<Vec<String>>>,
 }
 
 impl EnvSecrets {
     pub fn end_frame(&mut self) {
         self.reveals
-            .retain(|_, reveal| std::mem::take(&mut reveal.seen));
+            .retain(|_, request| std::mem::take(&mut request.seen));
+        self.key_lists
+            .retain(|_, request| std::mem::take(&mut request.seen));
+    }
+
+    pub fn keys(
+        &mut self,
+        ui: &mut egui::Ui,
+        target: &Target,
+        namespace: &str,
+        secret: &str,
+    ) -> &[String] {
+        let id = ui.make_persistent_id(("secret-keys", namespace, secret));
+        let request = self.key_lists.entry(id).or_insert_with(|| {
+            let (target, namespace, secret) =
+                (target.clone(), namespace.to_owned(), secret.to_owned());
+            Request::start(ui.ctx(), move || {
+                // Return only key names from kubectl; values are read on a row's reveal action.
+                let names = secret_output(
+                    &target,
+                    &namespace,
+                    &secret,
+                    r#"go-template={{range $key, $_ := .data}}{{println $key}}{{end}}"#,
+                )?;
+                Ok(names.lines().map(str::to_owned).collect())
+            })
+        });
+        request.poll();
+        match request.value.as_ref() {
+            Some(Ok(keys)) => keys,
+            Some(Err(error)) => {
+                ui.colored_label(crate::ORANGE, format!("secret({secret}) · {error}"));
+                &[]
+            }
+            None => {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(format!("Loading keys from secret({secret})…"));
+                });
+                &[]
+            }
+        }
     }
 
     pub fn show(
@@ -29,7 +100,7 @@ impl EnvSecrets {
         target: Option<&Target>,
         namespace: &str,
         secret: &str,
-        key: Option<&str>,
+        key: &str,
         variable: &str,
         source: impl FnOnce(&mut egui::Ui),
     ) {
@@ -37,22 +108,13 @@ impl EnvSecrets {
         let shown = self.reveals.contains_key(&id);
         let tooltip = format!("{} {variable}", if shown { "Hide" } else { "Reveal" });
         if let Some(reveal) = self.reveals.get_mut(&id) {
-            reveal.seen = true;
-            if reveal.value.is_none() {
-                match reveal.pending.try_recv() {
-                    Ok(value) => reveal.value = Some(value),
-                    Err(mpsc::TryRecvError::Disconnected) => {
-                        reveal.value = Some(Err("Could not load Secret.".into()))
-                    }
-                    Err(mpsc::TryRecvError::Empty) => {}
-                }
-            }
+            reveal.poll();
         }
         let value = self
             .reveals
             .get(&id)
             .and_then(|reveal| reveal.value.as_ref());
-        if key.is_none() || !matches!(value, Some(Ok(_))) {
+        if !matches!(value, Some(Ok(_))) {
             source(ui);
         }
         if shown {
@@ -63,21 +125,13 @@ impl EnvSecrets {
                 Some(Err(error)) => {
                     ui.colored_label(crate::ORANGE, error);
                 }
-                Some(Ok(values)) => {
-                    for (name, value) in values {
-                        if key.is_none() {
-                            ui.strong(name);
-                        }
-                        let value = if value.is_empty() { "(empty)" } else { value };
-                        ui.add(
-                            egui::Label::new(egui::RichText::new(value).color(crate::MUTED))
-                                .wrap()
-                                .selectable(true),
-                        );
-                    }
-                    if values.is_empty() {
-                        ui.label("(no keys)");
-                    }
+                Some(Ok(value)) => {
+                    let value = if value.is_empty() { "(empty)" } else { value };
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(value).color(crate::MUTED))
+                            .wrap()
+                            .selectable(true),
+                    );
                 }
             }
         }
@@ -91,32 +145,29 @@ impl EnvSecrets {
                 self.reveals.remove(&id);
                 ui.ctx().request_repaint();
             } else if let Some(target) = target.cloned() {
-                let (sender, pending) = mpsc::channel();
-                let (namespace, secret, key) = (
-                    namespace.to_owned(),
-                    secret.to_owned(),
-                    key.map(str::to_owned),
-                );
-                let ctx = ui.ctx().clone();
-                thread::spawn(move || {
-                    let _ = sender.send(read_secret(&target, &namespace, &secret, key.as_deref()));
-                    ctx.request_repaint();
+                let (namespace, secret, key) =
+                    (namespace.to_owned(), secret.to_owned(), key.to_owned());
+                let reveal = Request::start(ui.ctx(), move || {
+                    let key_literal =
+                        serde_json::to_string(&key).map_err(|_| "Invalid Secret key.")?;
+                    let format = r#"go-template={{range $key, $value := .data}}{{if eq $key KEY_LITERAL}}{{println $value}}{{end}}{{end}}"#
+                        .replace("KEY_LITERAL", &key_literal);
+                    let output = secret_output(&target, &namespace, &secret, &format)?;
+                    decode_secret(&output)
                 });
-                self.reveals.insert(
-                    id,
-                    Reveal {
-                        pending,
-                        value: None,
-                        seen: true,
-                    },
-                );
+                self.reveals.insert(id, reveal);
             }
         }
     }
 }
 
-fn read_secret(target: &Target, namespace: &str, name: &str, key: Option<&str>) -> SecretValues {
-    let output = target
+fn secret_output(
+    target: &Target,
+    namespace: &str,
+    name: &str,
+    format: &str,
+) -> Result<String, String> {
+    target
         .run(
             &[
                 "get",
@@ -124,39 +175,24 @@ fn read_secret(target: &Target, namespace: &str, name: &str, key: Option<&str>) 
                 "--namespace",
                 namespace,
                 "-o",
-                "json",
+                format,
                 "--",
                 name,
             ]
             .map(str::to_owned),
             None,
         )
-        .map_err(|_| "Could not read Secret. Check your access and try again.".to_owned())?;
-    decode_secret(&output, key)
+        .map_err(|_| "Could not read Secret. Check your access.".to_owned())
 }
 
-fn decode_secret(output: &str, key: Option<&str>) -> SecretValues {
-    let resource: Value =
-        serde_json::from_str(output).map_err(|_| "Could not read Secret data.")?;
-    let data = resource["data"].as_object();
-    let decode = |name: &str, value: &Value| {
-        let encoded = value.as_str().ok_or("Invalid Secret value.")?;
-        let bytes = STANDARD
-            .decode(encoded)
-            .map_err(|_| "Invalid Secret value.")?;
-        let text = String::from_utf8(bytes).unwrap_or_else(|_| "(non-text value)".into());
-        Ok((name.to_owned(), text))
-    };
-    if let Some(key) = key {
-        let value = data
-            .and_then(|data| data.get(key))
-            .ok_or("Key not found in Secret.")?;
-        return Ok(vec![decode(key, value)?]);
-    }
-    data.into_iter()
-        .flatten()
-        .map(|(name, value)| decode(name, value))
-        .collect()
+fn decode_secret(output: &str) -> Result<String, String> {
+    let encoded = output
+        .strip_suffix('\n')
+        .ok_or("Key not found in Secret.")?;
+    let bytes = STANDARD
+        .decode(encoded)
+        .map_err(|_| "Invalid Secret value.")?;
+    Ok(String::from_utf8(bytes).unwrap_or_else(|_| "(non-text value)".into()))
 }
 
 fn eye(ui: &mut egui::Ui, enabled: bool, shown: bool, label: &str) -> bool {
@@ -204,17 +240,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn decoding_a_single_secret_key_handles_empty_values_and_ignores_other_keys() {
-        let secret = r#"{"data":{"token":"Zml4dHVyZQ==","empty":"","other":"invalid base64"}}"#;
-        assert_eq!(
-            decode_secret(secret, Some("token")).unwrap(),
-            vec![("token".into(), "fixture".into())]
-        );
-        assert_eq!(
-            decode_secret(secret, Some("empty")).unwrap(),
-            vec![("empty".into(), "".into())]
-        );
-        assert!(decode_secret(secret, Some("missing")).is_err());
+    fn decoding_a_secret_distinguishes_empty_and_missing_values() {
+        assert_eq!(decode_secret("Zml4dHVyZQ==\n").unwrap(), "fixture");
+        assert_eq!(decode_secret("\n").unwrap(), "");
+        assert!(decode_secret("").is_err());
     }
 
     #[cfg(unix)]
@@ -230,7 +259,14 @@ mod tests {
         let exe = dir.path().join("kubectl");
         fs::write(
             &exe,
-            "#!/bin/sh\nprintf '%s' '{\"data\":{\"token\":\"Zml4dHVyZQ==\"}}'\n",
+            r#"#!/bin/sh
+case "$*" in
+    *'eq $key "token"'*) printf '%s\n' Zml4dHVyZQ== ;;
+    *'eq $key "other"'*) printf '%s\n' bm90LXJldmVhbGVk ;;
+    *'println $key'*) printf '%s\n' token other ;;
+    *) exit 1 ;;
+esac
+"#,
         )
         .unwrap();
         fs::set_permissions(&exe, fs::Permissions::from_mode(0o700)).unwrap();
@@ -248,25 +284,50 @@ mod tests {
                 },
                 |ctx| {
                     egui::CentralPanel::default().show(ctx, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.label("TOKEN :");
-                            secrets.show(
-                                ui,
-                                Some(&target),
-                                "test",
-                                "auth",
-                                Some("token"),
-                                "TOKEN",
-                                |ui| {
-                                    ui.label("secret(auth)");
-                                },
-                            );
-                        });
+                        let keys = secrets.keys(ui, &target, "test", "auth").to_vec();
+                        for key in keys {
+                            ui.push_id(&key, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label(format!("APP_{key} :"));
+                                    secrets.show(
+                                        ui,
+                                        Some(&target),
+                                        "test",
+                                        "auth",
+                                        &key,
+                                        &key,
+                                        |ui| {
+                                            ui.label("secret(auth)");
+                                        },
+                                    );
+                                });
+                            });
+                        }
                     });
                     secrets.end_frame();
                 },
             )
         };
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let output = frame(&mut secrets, vec![]);
+            let rows: Vec<_> = output
+                .shapes
+                .iter()
+                .filter_map(|shape| match &shape.shape {
+                    egui::Shape::Text(text) if text.galley.text().starts_with("APP_") => {
+                        Some(text.pos.y)
+                    }
+                    _ => None,
+                })
+                .collect();
+            if rows.len() == 2 {
+                assert!(rows[0] < rows[1], "each Secret key must have its own row");
+                break;
+            }
+            assert!(Instant::now() < deadline, "Secret key rows never appeared");
+            thread::sleep(Duration::from_millis(10));
+        }
         assert!(secrets.reveals.is_empty());
         let click = |secrets: &mut EnvSecrets| {
             let pos = frame(secrets, vec![])
@@ -296,8 +357,10 @@ mod tests {
                 matches!(&shape.shape,
                 egui::Shape::Text(text) if text.galley.text() == "fixture")
             }) {
-                assert!(!output.shapes.iter().any(|shape| matches!(&shape.shape,
+                assert!(output.shapes.iter().any(|shape| matches!(&shape.shape,
                     egui::Shape::Text(text) if text.galley.text() == "secret(auth)")));
+                assert!(!output.shapes.iter().any(|shape| matches!(&shape.shape,
+                    egui::Shape::Text(text) if text.galley.text() == "not-revealed")));
                 break;
             }
             assert!(Instant::now() < deadline, "Secret value never appeared");

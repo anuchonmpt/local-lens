@@ -779,7 +779,15 @@ fn container_environment<'a>(
                     open = ui
                         .push_id(("env", index), |ui| {
                             environment_reference(
-                                ui, snapshot, namespace, kind, selector, name, "", target, secrets,
+                                ui,
+                                snapshot,
+                                namespace,
+                                kind,
+                                selector,
+                                name,
+                                selector["key"].as_str(),
+                                target,
+                                secrets,
                             )
                         })
                         .inner
@@ -789,24 +797,65 @@ fn container_environment<'a>(
                     environment_line(ui, name, &value);
                 }
             }
-            for (index, source) in sources.iter().enumerate() {
+            let explicit: std::collections::HashSet<_> = vars
+                .iter()
+                .filter_map(|variable| variable["name"].as_str())
+                .collect();
+            let mut imported = std::collections::BTreeMap::new();
+            for source in sources {
                 let prefix = source["prefix"].as_str().unwrap_or_default();
                 for (kind, selector) in [
                     ("ConfigMap", &source["configMapRef"]),
                     ("Secret", &source["secretRef"]),
                 ] {
-                    if selector.is_object() {
-                        open = ui
-                            .push_id(("envFrom", index), |ui| {
-                                environment_reference(
-                                    ui, snapshot, namespace, kind, selector, "envFrom", prefix,
-                                    target, secrets,
-                                )
-                            })
-                            .inner
-                            .or(open);
+                    let Some(name) = selector["name"].as_str() else {
+                        continue;
+                    };
+                    let mut add_key = |key: &str| {
+                        let variable = format!("{prefix}{key}");
+                        if !explicit.contains(variable.as_str()) {
+                            // Later envFrom sources override earlier ones.
+                            imported.insert(variable, (kind, selector, key.to_owned()));
+                        }
+                    };
+                    if kind == "Secret" {
+                        if let Some(target) = target {
+                            for key in secrets.keys(ui, target, namespace, name) {
+                                add_key(key);
+                            }
+                        } else {
+                            label(ui, format!("secret({name}) · Keys unavailable"));
+                        }
+                    } else if let Some(data) = reference(snapshot, kind, namespace, name)
+                        .and_then(|resource| resource.raw["data"].as_object())
+                    {
+                        for (key, value) in data {
+                            if value.is_string() {
+                                add_key(key);
+                            }
+                        }
+                    } else {
+                        label(ui, format!("configMap({name}) · Keys unavailable"));
                     }
                 }
+            }
+            for (variable, (kind, selector, key)) in imported {
+                open = ui
+                    .push_id(("envFrom", &variable, &key), |ui| {
+                        environment_reference(
+                            ui,
+                            snapshot,
+                            namespace,
+                            kind,
+                            selector,
+                            &variable,
+                            Some(&key),
+                            target,
+                            secrets,
+                        )
+                    })
+                    .inner
+                    .or(open);
             }
         });
     });
@@ -847,12 +896,11 @@ fn environment_reference<'a>(
     kind: &str,
     selector: &Value,
     variable: &str,
-    prefix: &str,
+    key: Option<&str>,
     target: Option<&super::Target>,
     secrets: &mut EnvSecrets,
 ) -> Option<&'a Resource> {
     let name = selector["name"].as_str().unwrap_or_default();
-    let key = selector["key"].as_str();
     let resource = reference(snapshot, kind, namespace, name);
     let data = (kind == "ConfigMap")
         .then(|| resource.and_then(|item| item.raw["data"].as_object()))
@@ -882,25 +930,15 @@ fn environment_reference<'a>(
                 ui.label(caption).on_hover_text(hint);
             }
         };
-        if kind == "Secret" {
+        if let ("Secret", Some(key)) = (kind, key) {
             secrets.show(ui, target, namespace, name, key, variable, source);
         } else {
             source(ui);
-        }
-        if !prefix.is_empty() {
-            ui.label(format!("Prefix {prefix}"));
         }
         if selector["optional"] == true {
             ui.label("Optional");
         }
     });
-    if key.is_none() {
-        for (key, value) in data.into_iter().flatten() {
-            if let Some(value) = value.as_str() {
-                environment_line(ui, &format!("{prefix}{key}"), value);
-            }
-        }
-    }
     resource.filter(|_| clicked)
 }
 
