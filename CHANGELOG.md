@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.21 · 2026-11-09
+
+- Show the update status and download percentage above a thin progress bar.
+
 ## 0.1.20 · 2026-11-09
 
 - Check for updates in the background every hour while the app is open.

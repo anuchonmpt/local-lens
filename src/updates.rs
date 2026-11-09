@@ -289,12 +289,27 @@ impl Updates {
                         InstallProgress::Verifying => ("Verifying installer…", 1.0),
                         InstallProgress::Replacing => ("Installing update…", 1.0),
                     };
-                    ui.label(label);
-                    let mut bar = egui::ProgressBar::new(fraction).fill(crate::GREEN);
+                    let right = ui.available_rect_before_wrap().right();
+                    let status = ui.label(label);
                     if matches!(progress, InstallProgress::Downloading(_)) {
-                        bar = bar.show_percentage();
+                        ui.painter().text(
+                            egui::pos2(right, status.rect.center().y),
+                            egui::Align2::RIGHT_CENTER,
+                            format!("{:.0}%", fraction * 100.0),
+                            egui::TextStyle::Body.resolve(ui.style()),
+                            crate::MUTED,
+                        );
                     }
-                    ui.add(bar);
+                    let fill = if fraction > 0.0 {
+                        crate::TEXT
+                    } else {
+                        egui::Color32::TRANSPARENT
+                    };
+                    ui.add(
+                        egui::ProgressBar::new(fraction)
+                            .desired_height(4.0)
+                            .fill(fill),
+                    );
                     return false;
                 }
                 State::RestartRequired(message) | State::Error(message) => {
@@ -821,9 +836,39 @@ mod tests {
             .send(State::Installing(InstallProgress::Downloading(0.42)))
             .unwrap();
         frame(&mut updates, vec![]);
-        assert!(frame(&mut updates, vec![]).shapes.iter().any(|shape| {
-            matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text() == "42%")
-        }));
+        let progress = frame(&mut updates, vec![]);
+        let text_rect = |label| {
+            progress
+                .shapes
+                .iter()
+                .find_map(|shape| match &shape.shape {
+                    egui::Shape::Text(text) if text.galley.text() == label => {
+                        Some(egui::Rect::from_min_size(text.pos, text.galley.size()))
+                    }
+                    _ => None,
+                })
+                .expect("progress label")
+        };
+        let status = text_rect("Downloading update…");
+        let percent = text_rect("42%");
+        let track = progress
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Rect(rect)
+                    if rect.rect.height() == 4.0 && rect.rect.width() > 400.0 =>
+                {
+                    Some(rect.rect)
+                }
+                _ => None,
+            })
+            .expect("thin progress track");
+        assert!(status.right() < percent.left());
+        assert!(status.bottom().max(percent.bottom()) < track.top());
+        assert!(
+            (percent.right() - track.right()).abs() < 2.0,
+            "percent {percent:?}, track {track:?}, status {status:?}"
+        );
         sender.send(State::Error("Download failed".into())).unwrap();
         frame(&mut updates, vec![]);
         assert!(matches!(updates.state, State::Error(_)));
