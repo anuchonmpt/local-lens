@@ -16,6 +16,10 @@ pub struct Target {
 impl Target {
     pub fn command(&self, args: &[String]) -> Command {
         let mut command = Command::new(&self.exe);
+        #[cfg(target_os = "macos")]
+        if let Some(path) = macos_kubectl_path() {
+            command.env("PATH", path);
+        }
         if !self.config.is_empty() {
             command.args(["--kubeconfig", &self.config]);
         }
@@ -89,6 +93,32 @@ impl Target {
             Err(String::from_utf8_lossy(&output.stderr).trim().to_owned())
         }
     }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_kubectl_path() -> Option<std::ffi::OsString> {
+    let inherited =
+        std::env::var_os("PATH").unwrap_or_else(|| "/usr/bin:/bin:/usr/sbin:/sbin".into());
+    let mut paths: Vec<_> = std::env::split_paths(&inherited).collect();
+    // Finder does not load shell startup files. kubectl's exec credential plugins
+    // use the PATH of the child process, even when kubectl itself is an absolute path.
+    for directory in [
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        "/opt/homebrew/share/google-cloud-sdk/bin",
+        "/usr/local/share/google-cloud-sdk/bin",
+    ]
+    .map(PathBuf::from)
+    .into_iter()
+    .chain(std::env::var_os("HOME").into_iter().flat_map(|home| {
+        let home = PathBuf::from(home);
+        [home.join(".local/bin"), home.join("google-cloud-sdk/bin")]
+    })) {
+        if !paths.contains(&directory) {
+            paths.push(directory);
+        }
+    }
+    std::env::join_paths(paths).ok()
 }
 
 pub struct LocalContexts {

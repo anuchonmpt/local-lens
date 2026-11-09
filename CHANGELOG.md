@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.6 · 2026-11-09
+
+- Fixed cluster connections when launching the macOS app from Applications by making Homebrew and Google Cloud credential helpers discoverable by kubectl.
+
 ## 0.1.5 · 2026-11-09
 
 - Added a custom macOS app icon for Finder and the Dock.
