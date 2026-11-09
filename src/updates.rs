@@ -124,22 +124,32 @@ impl Updates {
     }
 
     pub fn footer(&mut self, ui: &mut egui::Ui) {
-        let (label, color, hint) = if matches!(self.state, State::Available(_)) {
-            (
-                concat!("v", env!("CARGO_PKG_VERSION"), " ↑"),
-                crate::GREEN,
-                "Update available · View changelog",
-            )
+        let available = matches!(self.state, State::Available(_));
+        let (color, hint) = if available {
+            (crate::GREEN, "Update available · View changelog")
         } else {
-            (
-                concat!("v", env!("CARGO_PKG_VERSION")),
-                crate::MUTED,
-                "View changelog",
-            )
+            (crate::MUTED, "View changelog")
         };
-        let version = egui::RichText::new(label).size(11.0).color(color);
-        if ui
-            .add(egui::Button::new(version).small().frame(false))
+        let label = concat!("v", env!("CARGO_PKG_VERSION"));
+        let version =
+            ui.painter()
+                .layout_no_wrap(label.into(), egui::FontId::proportional(11.0), color);
+        let arrow_space = if available { 12.0 } else { 0.0 };
+        let size = version.size() + egui::vec2(arrow_space, 0.0);
+        let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
+        });
+        ui.painter().galley(rect.min, version, color);
+        if available {
+            ui.painter().arrow(
+                rect.right_center() + egui::vec2(-5.0, 4.0),
+                egui::vec2(0.0, -8.0),
+                egui::Stroke::new(1.25_f32, color),
+            );
+        }
+        if response
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
             .on_hover_text(hint)
             .clicked()
         {
@@ -507,7 +517,11 @@ mod tests {
             sha256: String::new(),
             notes: String::new(),
         });
-        click(&mut updates, concat!("v", env!("CARGO_PKG_VERSION"), " ↑"));
+        assert!(frame(&mut updates, vec![]).shapes.iter().any(|shape| {
+            matches!(shape.shape, egui::Shape::LineSegment { points: [from, to], stroke }
+                if stroke.color == crate::GREEN && from.x == to.x && from.y > to.y)
+        }));
+        click(&mut updates, concat!("v", env!("CARGO_PKG_VERSION")));
         assert!(updates.visible);
         click(&mut updates, "Update to v1.0.0");
         assert!(matches!(updates.state, State::Installing));

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.8 · 2026-11-09
+
+- Fixed the green update arrow in the footer appearing as a square on some displays.
+
 ## 0.1.7 · 2026-11-09
 
 - Bundled kubectl v1.36.6 in the macOS installer for Apple Silicon and Intel.
