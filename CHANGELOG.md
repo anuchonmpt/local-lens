@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.2 · 2026-11-09
+
+- Download updates through the GitHub Release Assets API for more reliable access to the macOS installer.
+
 ## 0.1.1 · 2026-11-09
 
 - Added a universal macOS disk image for Apple Silicon and Intel Macs.

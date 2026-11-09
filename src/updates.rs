@@ -245,7 +245,10 @@ fn check(current: &str) -> Result<Option<Release>, String> {
         .and_then(|digest| digest.strip_prefix("sha256:"))
         .filter(|digest| digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()))
         .ok_or("GitHub did not provide a valid installer checksum.")?;
-    let url = format!("{RELEASES}/download/v{version}/{name}");
+    let asset_id = asset["id"]
+        .as_u64()
+        .ok_or("GitHub did not provide an installer ID.")?;
+    let url = format!("https://api.github.com/repos/{REPO}/releases/assets/{asset_id}");
     Ok(Some(Release {
         version,
         url,
@@ -298,6 +301,8 @@ fn install(release: &Release, bundle: &Path, current: &str) -> Result<(), String
     run(
         curl()
             .args([
+                "--header",
+                "Accept: application/octet-stream",
                 "--max-time",
                 "300",
                 "--max-filesize",
