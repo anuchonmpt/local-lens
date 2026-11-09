@@ -407,6 +407,10 @@ impl Observatory {
         } else if !app.demo {
             app.discover(true);
         }
+        #[cfg(target_os = "macos")]
+        if app.shot.is_none() {
+            app.updates.check_for_updates(&cc.egui_ctx);
+        }
         app
     }
     fn discover(&mut self, connect_current: bool) {
@@ -623,8 +627,6 @@ impl Observatory {
         badge(ui,if self.demo{"SAMPLE DATA"}else if self.snapshot.loaded > 0 {"KUBERNETES"} else if self.busy {"CONNECTING"} else if self.target.is_none() {"DISCONNECTED"} else {"UNAVAILABLE"},if self.demo{ORANGE}else{BLUE});
         ui.with_layout(egui::Layout::right_to_left(Align::Center),|ui|{
             if ui.button("Connections").clicked(){self.connections=true;}
-            #[cfg(target_os = "macos")]
-            self.updates.toolbar(ui);
             if ui.add_enabled(self.target.is_some() && !self.namespace.is_empty() && !self.busy && self.manifest.is_none(), egui::Button::new("Apply YAML…")).clicked() {
                 self.manifest = Some(Manifest { yaml: String::new(), original: None, feedback: String::new() });
             }

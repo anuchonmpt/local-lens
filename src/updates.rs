@@ -61,7 +61,7 @@ impl Updates {
         }
     }
 
-    pub fn toolbar(&mut self, ui: &mut egui::Ui) {
+    fn controls(&mut self, ui: &mut egui::Ui) {
         let (update_label, update_hint) = match &self.state {
             State::Available(release) => (
                 format!("Update to v{}", release.version),
@@ -113,19 +113,34 @@ impl Updates {
             .on_disabled_hover_text(check_hint)
             .clicked()
         {
-            self.start(ui.ctx(), State::Checking, || {
-                Ok(check(VERSION)?.map_or(State::Current, State::Available))
-            });
+            self.check_for_updates(ui.ctx());
         }
     }
 
+    pub fn check_for_updates(&mut self, ctx: &egui::Context) {
+        self.start(ctx, State::Checking, || {
+            Ok(check(VERSION)?.map_or(State::Current, State::Available))
+        });
+    }
+
     pub fn footer(&mut self, ui: &mut egui::Ui) {
-        let version = egui::RichText::new(concat!("v", env!("CARGO_PKG_VERSION")))
-            .size(11.0)
-            .color(crate::MUTED);
+        let (label, color, hint) = if matches!(self.state, State::Available(_)) {
+            (
+                concat!("v", env!("CARGO_PKG_VERSION"), " ↑"),
+                crate::GREEN,
+                "Update available · View changelog",
+            )
+        } else {
+            (
+                concat!("v", env!("CARGO_PKG_VERSION")),
+                crate::MUTED,
+                "View changelog",
+            )
+        };
+        let version = egui::RichText::new(label).size(11.0).color(color);
         if ui
             .add(egui::Button::new(version).small().frame(false))
-            .on_hover_text("View changelog")
+            .on_hover_text(hint)
             .clicked()
         {
             self.visible = true;
@@ -147,6 +162,7 @@ impl Updates {
                     .inner
                 })
                 .inner;
+            ui.horizontal(|ui| self.controls(ui));
             egui::ScrollArea::vertical()
                 .max_height(ctx.screen_rect().height() * 0.65)
                 .show(ui, |ui| {
@@ -434,7 +450,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn toolbar_starts_install_only_when_an_update_is_available() {
+    fn footer_opens_update_controls_and_marks_an_available_update() {
         let ctx = egui::Context::default();
         let mut updates = Updates {
             state: State::Current,
@@ -448,9 +464,9 @@ mod tests {
                 },
                 |ctx| {
                     egui::CentralPanel::default().show(ctx, |ui| {
-                        ui.horizontal(|ui| updates.toolbar(ui));
                         ui.horizontal(|ui| updates.footer(ui));
                     });
+                    updates.show_history(ctx);
                 },
             )
         };
@@ -475,8 +491,15 @@ mod tests {
             frame(updates, vec![button(false)]);
         };
 
+        assert!(!frame(&mut updates, vec![]).shapes.iter().any(|shape| {
+            matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text() == "Update")
+        }));
+        click(&mut updates, concat!("v", env!("CARGO_PKG_VERSION")));
+        assert!(updates.visible);
         click(&mut updates, "Update");
         assert!(matches!(updates.state, State::Current));
+        click(&mut updates, "×");
+        assert!(!updates.visible);
 
         updates.state = State::Available(Release {
             version: Version::new(1, 0, 0),
@@ -484,12 +507,10 @@ mod tests {
             sha256: String::new(),
             notes: String::new(),
         });
+        click(&mut updates, concat!("v", env!("CARGO_PKG_VERSION"), " ↑"));
+        assert!(updates.visible);
         click(&mut updates, "Update to v1.0.0");
         assert!(matches!(updates.state, State::Installing));
-        assert!(!updates.visible);
-
-        click(&mut updates, concat!("v", env!("CARGO_PKG_VERSION")));
-        assert!(updates.visible);
     }
 
     #[test]

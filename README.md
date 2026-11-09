@@ -10,10 +10,10 @@ Download the macOS disk image from [GitHub Releases](https://github.com/anuchonm
 open it, and drag **Cluster Observatory** into **Applications**. The same download
 supports Apple Silicon and Intel. The app is ad hoc signed and has not been notarized.
 
-Click **Check** in the toolbar to look for a newer release. When one is available,
-click **Update** to install it and reopen the app. Click the version number in the
-footer to see the changelog and release notes. The app must be in a location writable by
-your account to install updates.
+The app checks for updates on startup. A green version number with an up arrow
+in the footer means a newer release is available. Click the version number to
+open the changelog, check again, or install an update and reopen the app. The app
+must be in a location writable by your account to install updates.
 
 To build the disk image locally, install both Rust targets with
 `rustup target add aarch64-apple-darwin x86_64-apple-darwin` and run

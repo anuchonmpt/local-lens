@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.4 · 2026-11-09
+
+- Moved Check and Update into the changelog, which opens from the version number in the footer.
+- Check for updates when the app opens. The footer version turns green and shows an up arrow when an update is available.
+
 ## 0.1.3 · 2026-11-09
 
 - Check for updates from the toolbar. The Update button is enabled only when a newer version is available.
