@@ -8,7 +8,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::mpsc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -17,6 +17,7 @@ const RELEASES: &str = "https://github.com/anuchonmpt/local-lens/releases";
 const APP_NAME: &str = "Cluster Observatory.app";
 const BUNDLE_ID: &str = "local.lenser.cluster-observatory";
 const CHANGELOG: &str = include_str!("../CHANGELOG.md");
+const CHECK_INTERVAL: Duration = Duration::from_secs(60 * 60);
 
 #[derive(Clone)]
 struct Release {
@@ -52,6 +53,7 @@ enum InstallProgress {
 pub struct Updates {
     state: State,
     result: Option<mpsc::Receiver<State>>,
+    next_check: Option<Instant>,
     show_result: bool,
     skip_file: Option<PathBuf>,
     skipped: Option<Version>,
@@ -96,9 +98,28 @@ impl Updates {
 
     pub fn check_for_updates(&mut self, ctx: &egui::Context) {
         if self.result.is_none() {
+            self.next_check = Some(Instant::now() + CHECK_INTERVAL);
             self.start(ctx, State::Checking, |_| {
                 Ok(check(VERSION)?.map_or(State::Current, State::Available))
             });
+        }
+    }
+
+    pub fn check_in_background(&mut self, ctx: &egui::Context) {
+        let Some(deadline) = self.next_check else {
+            return;
+        };
+        if self.result.is_some()
+            || self.show_result
+            || matches!(self.state, State::Restarting | State::RestartRequired(_))
+        {
+            return;
+        }
+        let delay = deadline.saturating_duration_since(Instant::now());
+        if delay.is_zero() {
+            self.check_for_updates(ctx);
+        } else {
+            ctx.request_repaint_after(delay);
         }
     }
 

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.20 · 2026-11-09
+
+- Check for updates in the background every hour while the app is open.
+
 ## 0.1.19 · 2026-11-09
 
 - Restyle the version menu with icons and a clearer hover state.

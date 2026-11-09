@@ -2290,7 +2290,10 @@ impl eframe::App for Observatory {
             self.discover_source(String::new(), false);
         }
         #[cfg(target_os = "macos")]
-        self.updates.poll(ctx);
+        {
+            self.updates.poll(ctx);
+            self.updates.check_in_background(ctx);
+        }
         if self.shot.is_none()&&!self.demo&&!self.busy&&self.confirm.is_none()&&self.last_refresh.elapsed()>=Duration::from_secs(REFRESH){self.start_fetch();}
         self.top(ctx);self.sidebar(ctx);
         #[cfg(target_os = "macos")]
