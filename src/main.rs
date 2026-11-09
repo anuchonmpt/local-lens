@@ -624,7 +624,7 @@ impl Observatory {
         ui.with_layout(egui::Layout::right_to_left(Align::Center),|ui|{
             if ui.button("Connections").clicked(){self.connections=true;}
             #[cfg(target_os = "macos")]
-            if ui.button(concat!("Updates · v", env!("CARGO_PKG_VERSION"))).clicked() { self.updates.open(); }
+            self.updates.toolbar(ui);
             if ui.add_enabled(self.target.is_some() && !self.namespace.is_empty() && !self.busy && self.manifest.is_none(), egui::Button::new("Apply YAML…")).clicked() {
                 self.manifest = Some(Manifest { yaml: String::new(), original: None, feedback: String::new() });
             }
@@ -2140,6 +2140,8 @@ impl eframe::App for Observatory {
     }
 
     fn update(&mut self,ctx:&egui::Context,_frame:&mut eframe::Frame){self.poll();
+        #[cfg(target_os = "macos")]
+        self.updates.poll(ctx);
         if self.shot.is_none()&&!self.demo&&!self.busy&&self.confirm.is_none()&&self.last_refresh.elapsed()>=Duration::from_secs(REFRESH){self.start_fetch();}
         self.top(ctx);self.sidebar(ctx);
         #[cfg(target_os = "macos")]
@@ -2148,6 +2150,8 @@ impl eframe::App for Observatory {
             .frame(egui::Frame::new().fill(PANEL).inner_margin(8))
             .show(ctx, |ui| {
                 ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                    #[cfg(target_os = "macos")]
+                    self.updates.footer(ui);
                     #[cfg(target_os = "macos")]
                     ui.label(RichText::new(self.process_usage.label()).monospace().size(11.0).color(MUTED))
                         .on_hover_text("This app process · CPU is a recent average, with 100% equal to one core. RAM is resident memory.");
@@ -2178,7 +2182,7 @@ impl eframe::App for Observatory {
         self.connections(ctx);
         self.manifest_editor(ctx);
         #[cfg(target_os = "macos")]
-        self.updates.show(ctx);
+        self.updates.show_history(ctx);
         if !ctx.input(|input| input.pointer.primary_down()) {
             self.save_pending_table_width();
         }

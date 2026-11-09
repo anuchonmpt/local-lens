@@ -33,119 +33,139 @@ enum State {
     Current,
     Available(Release),
     Installing,
-    Installed(PathBuf),
+    Restarting,
+    RestartRequired(String),
     Error(String),
 }
 
 #[derive(Default)]
 pub struct Updates {
     visible: bool,
-    show_history: bool,
     state: State,
     result: Option<mpsc::Receiver<State>>,
 }
 
 impl Updates {
-    pub fn open(&mut self) {
-        self.visible = true;
+    pub fn poll(&mut self, ctx: &egui::Context) {
+        let Some(receiver) = &self.result else { return };
+        self.state = match receiver.try_recv() {
+            Ok(state) => state,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                State::Error("The update task stopped unexpectedly.".into())
+            }
+            Err(mpsc::TryRecvError::Empty) => return,
+        };
+        self.result = None;
+        if matches!(self.state, State::Restarting) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
     }
 
-    pub fn show(&mut self, ctx: &egui::Context) {
-        if let Some(receiver) = &self.result {
-            match receiver.try_recv() {
-                Ok(state) => {
-                    self.state = state;
-                    self.result = None;
-                }
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    self.state = State::Error("The update task stopped unexpectedly.".into());
-                    self.result = None;
-                }
-                Err(mpsc::TryRecvError::Empty) => {}
+    pub fn toolbar(&mut self, ui: &mut egui::Ui) {
+        let (update_label, update_hint) = match &self.state {
+            State::Available(release) => (
+                format!("Update to v{}", release.version),
+                "Install the update and reopen the app.",
+            ),
+            State::Installing => ("Updating…".into(), "Downloading and installing the update."),
+            State::Restarting => ("Restarting…".into(), "Opening the new version."),
+            State::RestartRequired(_) => (
+                "Restart needed".into(),
+                "The update was installed. Quit and reopen the app.",
+            ),
+            State::Current => ("Update".into(), "You're up to date."),
+            _ => ("Update".into(), "Check for a newer version first."),
+        };
+        let available = matches!(self.state, State::Available(_));
+        if ui
+            .add_enabled(available, egui::Button::new(update_label))
+            .on_hover_text(update_hint)
+            .on_disabled_hover_text(update_hint)
+            .clicked()
+        {
+            if let State::Available(release) = &self.state {
+                let release = release.clone();
+                self.start(ui.ctx(), State::Installing, move || {
+                    let bundle = running_bundle()?;
+                    install(&release, &bundle, VERSION)?;
+                    Ok(match restart(&bundle) {
+                        Ok(()) => State::Restarting,
+                        Err(error) => State::RestartRequired(format!(
+                            "The update was installed. Quit and reopen the app. ({error})"
+                        )),
+                    })
+                });
             }
         }
+
+        let (check_label, check_hint) = match &self.state {
+            State::Checking => ("Checking…", "Checking GitHub Releases."),
+            State::Current => ("Up to date", "You're up to date. Click to check again."),
+            State::Error(error) => ("Retry", error.as_str()),
+            State::RestartRequired(error) => ("Check", error.as_str()),
+            _ => ("Check", "Check for updates."),
+        };
+        let can_check = !matches!(self.state, State::Restarting | State::RestartRequired(_))
+            && self.result.is_none();
+        if ui
+            .add_enabled(can_check, egui::Button::new(check_label))
+            .on_hover_text(check_hint)
+            .on_disabled_hover_text(check_hint)
+            .clicked()
+        {
+            self.start(ui.ctx(), State::Checking, || {
+                Ok(check(VERSION)?.map_or(State::Current, State::Available))
+            });
+        }
+    }
+
+    pub fn footer(&mut self, ui: &mut egui::Ui) {
+        let version = egui::RichText::new(concat!("v", env!("CARGO_PKG_VERSION")))
+            .size(11.0)
+            .color(crate::MUTED);
+        if ui
+            .add(egui::Button::new(version).small().frame(false))
+            .on_hover_text("View changelog")
+            .clicked()
+        {
+            self.visible = true;
+        }
+    }
+
+    pub fn show_history(&mut self, ctx: &egui::Context) {
         if !self.visible {
             return;
         }
-
-        let mut visible = self.visible;
-        egui::Window::new("Software Updates")
-            .open(&mut visible)
-            .resizable(false)
-            .collapsible(false)
-            .default_width(380.0)
-            .show(ctx, |ui| {
-                ui.label(format!("Running version: {VERSION}"));
-                match &self.state {
-                    State::Idle => {}
-                    State::Current => {
-                        ui.label("You're up to date.");
-                    }
-                    State::Error(message) => {
-                        ui.label(message);
-                    }
-                    State::Checking | State::Installing => {
-                        ui.horizontal(|ui| {
-                            ui.spinner();
-                            ui.label(if matches!(self.state, State::Checking) {
-                                "Checking GitHub…"
-                            } else {
-                                "Downloading and installing the update…"
-                            });
-                        });
-                    }
-                    State::Available(release) => {
-                        ui.label(format!("Version {} is available.", release.version));
+        let modal = egui::Modal::new(egui::Id::new("changelog")).show(ctx, |ui| {
+            ui.set_width(480.0);
+            let close = ui
+                .horizontal(|ui| {
+                    ui.heading("Changelog");
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.button("×").on_hover_text("Close changelog").clicked()
+                    })
+                    .inner
+                })
+                .inner;
+            egui::ScrollArea::vertical()
+                .max_height(ctx.screen_rect().height() * 0.65)
+                .show(ui, |ui| {
+                    if let State::Available(release) = &self.state {
                         if !release.notes.trim().is_empty() {
-                            ui.collapsing("What's New", |ui| {
-                                show_changelog(ui, "release-notes", &release.notes)
-                            });
-                        }
-                        if ui.button("Download and Install").clicked() {
-                            let release = release.clone();
-                            self.start(ctx, State::Installing, move || {
-                                let bundle = running_bundle()?;
-                                install(&release, &bundle, VERSION)?;
-                                Ok(State::Installed(bundle))
+                            ui.collapsing(format!("What's New in v{}", release.version), |ui| {
+                                show_changelog(ui, &release.notes);
                             });
                         }
                     }
-                    State::Installed(bundle) => {
-                        ui.label("Update installed. Restart to use the new version.");
-                        if ui.button("Restart App").clicked() {
-                            match restart(bundle) {
-                                Ok(()) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
-                                Err(error) => {
-                                    ui.label(format!("Could not restart: {error}"));
-                                }
-                            }
-                        }
-                    }
-                }
-                ui.horizontal(|ui| {
-                    let can_check =
-                        matches!(self.state, State::Idle | State::Current | State::Error(_));
-                    if ui
-                        .add_enabled(can_check, egui::Button::new("Check for Updates"))
-                        .clicked()
-                    {
-                        self.start(ctx, State::Checking, || {
-                            Ok(check(VERSION)?.map_or(State::Current, State::Available))
-                        });
-                    }
-                    ui.hyperlink_to("GitHub Releases", RELEASES);
+                    show_changelog(ui, CHANGELOG);
                 });
-                if ui
-                    .selectable_label(self.show_history, "Version History")
-                    .clicked()
-                {
-                    self.show_history = !self.show_history;
-                }
-                if self.show_history {
-                    show_changelog(ui, "version-history", CHANGELOG);
-                }
-            });
-        self.visible = visible;
+            ui.separator();
+            ui.hyperlink_to("GitHub Releases", RELEASES);
+            close
+        });
+        if modal.inner || modal.should_close() {
+            self.visible = false;
+        }
     }
 
     fn start(
@@ -165,21 +185,21 @@ impl Updates {
     }
 }
 
-fn show_changelog(ui: &mut egui::Ui, id: &str, notes: &str) {
-    egui::ScrollArea::vertical()
-        .id_salt(id)
-        .max_height(220.0)
-        .show(ui, |ui| {
-            for line in notes.lines() {
-                if let Some(heading) = line.strip_prefix("## ") {
-                    ui.strong(heading);
-                } else if let Some(item) = line.strip_prefix("- ") {
-                    ui.label(format!("• {item}"));
-                } else if !line.is_empty() && !line.starts_with("# ") {
-                    ui.label(line);
-                }
-            }
-        });
+fn show_changelog(ui: &mut egui::Ui, notes: &str) {
+    for line in notes.lines() {
+        if let Some(heading) = line.strip_prefix("## ") {
+            ui.add_space(10.0);
+            ui.strong(heading);
+            ui.separator();
+        } else if let Some(item) = line.strip_prefix("- ") {
+            ui.horizontal_top(|ui| {
+                ui.label("•");
+                ui.add(egui::Label::new(item).wrap());
+            });
+        } else if !line.is_empty() && !line.starts_with("# ") {
+            ui.label(line);
+        }
+    }
 }
 
 fn run(command: &mut Command, action: &str) -> Result<String, String> {
@@ -412,6 +432,65 @@ fn restart(bundle: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn toolbar_starts_install_only_when_an_update_is_available() {
+        let ctx = egui::Context::default();
+        let mut updates = Updates {
+            state: State::Current,
+            ..Default::default()
+        };
+        let frame = |updates: &mut Updates, events| {
+            ctx.run(
+                egui::RawInput {
+                    events,
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        ui.horizontal(|ui| updates.toolbar(ui));
+                        ui.horizontal(|ui| updates.footer(ui));
+                    });
+                },
+            )
+        };
+        let click = |updates: &mut Updates, label| {
+            let pos = frame(updates, vec![])
+                .shapes
+                .into_iter()
+                .find_map(|shape| match shape.shape {
+                    egui::Shape::Text(text) if text.galley.text() == label => {
+                        Some(text.pos + text.galley.size() / 2.0)
+                    }
+                    _ => None,
+                })
+                .expect("update button label");
+            let button = |pressed| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            };
+            frame(updates, vec![egui::Event::PointerMoved(pos), button(true)]);
+            frame(updates, vec![button(false)]);
+        };
+
+        click(&mut updates, "Update");
+        assert!(matches!(updates.state, State::Current));
+
+        updates.state = State::Available(Release {
+            version: Version::new(1, 0, 0),
+            url: String::new(),
+            sha256: String::new(),
+            notes: String::new(),
+        });
+        click(&mut updates, "Update to v1.0.0");
+        assert!(matches!(updates.state, State::Installing));
+        assert!(!updates.visible);
+
+        click(&mut updates, concat!("v", env!("CARGO_PKG_VERSION")));
+        assert!(updates.visible);
+    }
 
     #[test]
     #[ignore = "downloads the public release and mounts the macOS installer"]

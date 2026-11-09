@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.3 · 2026-11-09
+
+- Check for updates from the toolbar. The Update button is enabled only when a newer version is available.
+- Click Update to install and reopen the app without an extra dialog.
+- Moved the version number to the footer. Click it to open the changelog.
+
 ## 0.1.2 · 2026-11-09
 
 - Download updates through the GitHub Release Assets API for more reliable access to the macOS installer.
