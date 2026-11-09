@@ -2258,6 +2258,17 @@ fn nav_icon(p:&egui::Painter,c:Pos2,kind:&str,color:Color32){
         "network"|"topology"=>{box_at(-2.5,-7.0,5.0,5.0);line(Vec2::new(0.0,-2.0),Vec2::new(0.0,2.0));line(Vec2::new(-5.0,2.0),Vec2::new(5.0,2.0));for x in [-5.0,5.0]{box_at(x-2.5,3.0,5.0,5.0);}}
         "storage"=>{box_at(-7.0,-6.0,14.0,12.0);for y in [-2.0,2.0]{line(Vec2::new(-7.0,y),Vec2::new(7.0,y));}}
         "namespace"=>{box_at(-6.0,-6.0,12.0,12.0);line(Vec2::new(-2.0,0.0),Vec2::new(2.0,0.0));line(Vec2::new(0.0,-2.0),Vec2::new(0.0,2.0));}
+        "update" => {
+            line(Vec2::new(0.0, -7.0), Vec2::new(0.0, 2.0));
+            p.line(vec![c + Vec2::new(-3.5, -1.5), c + Vec2::new(0.0, 2.0), c + Vec2::new(3.5, -1.5)], stroke);
+            p.line(vec![c + Vec2::new(-6.0, 3.0), c + Vec2::new(-6.0, 6.0), c + Vec2::new(6.0, 6.0), c + Vec2::new(6.0, 3.0)], stroke);
+        }
+        "changelog" => {
+            box_at(-5.0, -7.0, 10.0, 14.0);
+            for y in [-3.0, 0.0, 3.0] {
+                line(Vec2::new(-2.0, y), Vec2::new(2.0, y));
+            }
+        }
         "events"=>{p.circle_stroke(c,7.0,stroke);line(Vec2::new(0.0,-4.0),Vec2::new(0.0,0.0));line(Vec2::ZERO,Vec2::new(3.0,2.0));}
         "terminal"=>{line(Vec2::new(-6.0,-4.0),Vec2::new(-2.0,0.0));line(Vec2::new(-2.0,0.0),Vec2::new(-6.0,4.0));line(Vec2::new(0.0,5.0),Vec2::new(6.0,5.0));}
         _=>{}

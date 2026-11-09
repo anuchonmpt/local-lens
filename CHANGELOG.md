@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.19 · 2026-11-09
+
+- Restyle the version menu with icons and a clearer hover state.
+- Show download progress and installation stages while updating.
+
 ## 0.1.18 · 2026-11-09
 
 - Give the resource details scrollbar its own space so it cannot cover Secret reveal buttons.

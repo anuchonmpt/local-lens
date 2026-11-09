@@ -8,6 +8,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::mpsc,
+    time::Duration,
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -22,6 +23,7 @@ struct Release {
     version: Version,
     url: String,
     sha256: String,
+    size: u64,
     notes: String,
 }
 
@@ -33,10 +35,17 @@ enum State {
     Current,
     Available(Release),
     Skipped(Version),
-    Installing,
+    Installing(InstallProgress),
     Restarting,
     RestartRequired(String),
     Error(String),
+}
+
+enum InstallProgress {
+    Preparing,
+    Downloading(f32),
+    Verifying,
+    Replacing,
 }
 
 #[derive(Default)]
@@ -64,15 +73,20 @@ impl Updates {
 
     pub fn poll(&mut self, ctx: &egui::Context) {
         let Some(receiver) = &self.result else { return };
-        self.state = match receiver.try_recv() {
-            Ok(State::Available(release)) if self.skipped.as_ref() == Some(&release.version) => {
-                State::Skipped(release.version)
+        self.state = loop {
+            match receiver.try_recv() {
+                Ok(State::Installing(progress)) => self.state = State::Installing(progress),
+                Ok(State::Available(release))
+                    if self.skipped.as_ref() == Some(&release.version) =>
+                {
+                    break State::Skipped(release.version);
+                }
+                Ok(state) => break state,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    break State::Error("The update task stopped unexpectedly.".into());
+                }
+                Err(mpsc::TryRecvError::Empty) => return,
             }
-            Ok(state) => state,
-            Err(mpsc::TryRecvError::Disconnected) => {
-                State::Error("The update task stopped unexpectedly.".into())
-            }
-            Err(mpsc::TryRecvError::Empty) => return,
         };
         self.result = None;
         if matches!(self.state, State::Restarting) {
@@ -82,7 +96,7 @@ impl Updates {
 
     pub fn check_for_updates(&mut self, ctx: &egui::Context) {
         if self.result.is_none() {
-            self.start(ctx, State::Checking, || {
+            self.start(ctx, State::Checking, |_| {
                 Ok(check(VERSION)?.map_or(State::Current, State::Available))
             });
         }
@@ -133,35 +147,51 @@ impl Updates {
         if response.clicked() {
             ui.memory_mut(|memory| memory.toggle_popup(menu));
         }
+        let mut anchor = response.clone();
+        anchor.rect.min = egui::pos2(rect.right() - 204.0, rect.top() - 7.0);
+        let mut popup_ui = ui.new_child(egui::UiBuilder::new());
+        let style = popup_ui.style_mut();
+        style.spacing.menu_margin = egui::Margin::same(6);
+        style.visuals.menu_corner_radius = 9.into();
+        style.visuals.window_fill = crate::PANEL;
+        style.visuals.window_stroke = egui::Stroke::new(1.0_f32, crate::BORDER);
         egui::popup::popup_above_or_below_widget(
-            ui,
+            &popup_ui,
             menu,
-            &response,
+            &anchor,
             egui::AboveOrBelow::Above,
             egui::PopupCloseBehavior::CloseOnClickOutside,
             |ui| {
-                ui.set_min_width(155.0);
-                let can_check = !matches!(
-                    self.state,
-                    State::Installing | State::Restarting | State::RestartRequired(_)
-                );
-                let check_label = if self.show_result && matches!(self.state, State::Checking) {
+                ui.spacing_mut().item_spacing.y = 2.0;
+                ui.add_space(3.0);
+                ui.horizontal(|ui| {
+                    ui.add_space(9.0);
+                    ui.label(
+                        egui::RichText::new("CLUSTER OBSERVATORY")
+                            .size(10.0)
+                            .strong()
+                            .color(crate::MUTED),
+                    );
+                });
+                ui.add_space(3.0);
+                ui.add(egui::Separator::default().spacing(4.0));
+                let checking = self.show_result && matches!(self.state, State::Checking);
+                let can_check = !checking
+                    && !matches!(
+                        self.state,
+                        State::Installing(_) | State::Restarting | State::RestartRequired(_)
+                    );
+                let check_label = if checking {
                     "Checking…"
                 } else {
                     "Check Update"
                 };
-                if ui
-                    .add_enabled(
-                        can_check && check_label == "Check Update",
-                        egui::Button::new(check_label),
-                    )
-                    .clicked()
-                {
+                if version_menu_row(ui, check_label, "update", can_check, available).clicked() {
                     ui.memory_mut(|memory| memory.close_popup());
                     self.show_result = true;
                     self.check_for_updates(ui.ctx());
                 }
-                if ui.button("View Changelog").clicked() {
+                if version_menu_row(ui, "View Changelog", "changelog", true, false).clicked() {
                     ui.memory_mut(|memory| memory.close_popup());
                     return true;
                 }
@@ -229,11 +259,21 @@ impl Updates {
                 State::Skipped(version) => {
                     ui.label(format!("Version v{version} was skipped."));
                 }
-                State::Installing => {
-                    ui.horizontal(|ui| {
-                        ui.spinner();
-                        ui.label("Downloading and installing the update…");
-                    });
+                State::Installing(progress) => {
+                    let (label, fraction) = match progress {
+                        InstallProgress::Preparing => ("Preparing download…", 0.0),
+                        InstallProgress::Downloading(fraction) => {
+                            ("Downloading update…", *fraction)
+                        }
+                        InstallProgress::Verifying => ("Verifying installer…", 1.0),
+                        InstallProgress::Replacing => ("Installing update…", 1.0),
+                    };
+                    ui.label(label);
+                    let mut bar = egui::ProgressBar::new(fraction).fill(crate::GREEN);
+                    if matches!(progress, InstallProgress::Downloading(_)) {
+                        bar = bar.show_percentage();
+                    }
+                    ui.add(bar);
                     return false;
                 }
                 State::RestartRequired(message) | State::Error(message) => {
@@ -243,7 +283,7 @@ impl Updates {
             }
             ui.button("OK").clicked()
         });
-        if !matches!(self.state, State::Installing) && (modal.inner || modal.should_close()) {
+        if !matches!(self.state, State::Installing(_)) && (modal.inner || modal.should_close()) {
             self.show_result = false;
         }
     }
@@ -263,16 +303,20 @@ impl Updates {
     }
 
     fn install_update(&mut self, ctx: &egui::Context, release: Release) {
-        self.start(ctx, State::Installing, move || {
-            let bundle = running_bundle()?;
-            install(&release, &bundle, VERSION)?;
-            Ok(match restart(&bundle) {
-                Ok(()) => State::Restarting,
-                Err(error) => State::RestartRequired(format!(
-                    "The update was installed. Quit and reopen the app. ({error})"
-                )),
-            })
-        });
+        self.start(
+            ctx,
+            State::Installing(InstallProgress::Preparing),
+            move |progress| {
+                let bundle = running_bundle()?;
+                install(&release, &bundle, VERSION, progress)?;
+                Ok(match restart(&bundle) {
+                    Ok(()) => State::Restarting,
+                    Err(error) => State::RestartRequired(format!(
+                        "The update was installed. Quit and reopen the app. ({error})"
+                    )),
+                })
+            },
+        );
     }
 
     pub fn show_settings(&self, ui: &mut egui::Ui) {
@@ -295,17 +339,61 @@ impl Updates {
         &mut self,
         ctx: &egui::Context,
         state: State,
-        task: impl FnOnce() -> Result<State, String> + Send + 'static,
+        task: impl FnOnce(&dyn Fn(InstallProgress)) -> Result<State, String> + Send + 'static,
     ) {
         let (sender, receiver) = mpsc::channel();
         let ctx = ctx.clone();
         self.state = state;
         self.result = Some(receiver);
         std::thread::spawn(move || {
-            let _ = sender.send(task().unwrap_or_else(State::Error));
+            let result = task(&|progress| {
+                let _ = sender.send(State::Installing(progress));
+                ctx.request_repaint();
+            });
+            let _ = sender.send(result.unwrap_or_else(State::Error));
             ctx.request_repaint();
         });
     }
+}
+
+fn version_menu_row(
+    ui: &mut egui::Ui,
+    label: &str,
+    icon: &str,
+    enabled: bool,
+    highlighted: bool,
+) -> egui::Response {
+    ui.add_enabled_ui(enabled, |ui| {
+        let (rect, response) =
+            ui.allocate_exact_size(egui::vec2(ui.available_width(), 34.0), egui::Sense::click());
+        response
+            .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label));
+        let painter = ui.painter();
+        if enabled && (response.hovered() || response.has_focus()) {
+            painter.rect_filled(rect, 5.0, crate::SIDE);
+        }
+        let text = if enabled { crate::TEXT } else { crate::MUTED };
+        let icon_color = if highlighted {
+            crate::GREEN
+        } else {
+            crate::MUTED
+        };
+        crate::nav_icon(
+            painter,
+            rect.left_center() + egui::vec2(18.0, 0.0),
+            icon,
+            icon_color,
+        );
+        painter.text(
+            rect.left_center() + egui::vec2(35.0, 0.0),
+            egui::Align2::LEFT_CENTER,
+            label,
+            egui::FontId::proportional(13.0),
+            text,
+        );
+        response.on_hover_cursor(egui::CursorIcon::PointingHand)
+    })
+    .inner
 }
 
 fn show_changelog(ui: &mut egui::Ui, notes: &str) {
@@ -391,11 +479,16 @@ fn check(current: &str) -> Result<Option<Release>, String> {
     let asset_id = asset["id"]
         .as_u64()
         .ok_or("GitHub did not provide an installer ID.")?;
+    let size = asset["size"]
+        .as_u64()
+        .filter(|size| *size > 0)
+        .ok_or("GitHub did not provide the installer size.")?;
     let url = format!("https://api.github.com/repos/{REPO}/releases/assets/{asset_id}");
     Ok(Some(Release {
         version,
         url,
         sha256: sha256.to_ascii_lowercase(),
+        size,
         notes: release["body"].as_str().unwrap_or_default().to_owned(),
     }))
 }
@@ -426,7 +519,68 @@ fn plist(bundle: &Path, key: &str) -> Result<String, String> {
     .map(|value| value.trim().to_owned())
 }
 
-fn install(release: &Release, bundle: &Path, current: &str) -> Result<(), String> {
+fn download_installer(
+    release: &Release,
+    dmg: &Path,
+    progress: &dyn Fn(InstallProgress),
+) -> Result<(), String> {
+    let download_error = |error| format!("Could not download the update: {error}");
+    let mut child = curl()
+        .args([
+            "--header",
+            "Accept: application/octet-stream",
+            "--max-time",
+            "300",
+            "--max-filesize",
+            "157286400",
+            "--output",
+        ])
+        .arg(dmg)
+        .arg(&release.url)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| download_error(error.to_string()))?;
+    progress(InstallProgress::Downloading(0.0));
+    let mut last_bytes = 0;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {}
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(download_error(error.to_string()));
+            }
+        }
+        if let Ok(file) = fs::metadata(dmg) {
+            let bytes = file.len();
+            if bytes != last_bytes {
+                let fraction = (bytes as f32 / release.size as f32).min(1.0);
+                progress(InstallProgress::Downloading(fraction));
+                last_bytes = bytes;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let output = child
+        .wait_with_output()
+        .map_err(|error| download_error(error.to_string()))?;
+    if !output.status.success() {
+        return Err(download_error(
+            String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        ));
+    }
+    progress(InstallProgress::Downloading(1.0));
+    Ok(())
+}
+
+fn install(
+    release: &Release,
+    bundle: &Path,
+    current: &str,
+    progress: &dyn Fn(InstallProgress),
+) -> Result<(), String> {
     if plist(bundle, "CFBundleIdentifier")? != BUNDLE_ID {
         return Err("This app bundle has an unexpected identifier.".into());
     }
@@ -441,21 +595,8 @@ fn install(release: &Release, bundle: &Path, current: &str) -> Result<(), String
         ))?;
     let download = tempfile::tempdir().map_err(|error| error.to_string())?;
     let dmg = download.path().join("update.dmg");
-    run(
-        curl()
-            .args([
-                "--header",
-                "Accept: application/octet-stream",
-                "--max-time",
-                "300",
-                "--max-filesize",
-                "157286400",
-                "--output",
-            ])
-            .arg(&dmg)
-            .arg(&release.url),
-        "Could not download the update",
-    )?;
+    download_installer(release, &dmg, progress)?;
+    progress(InstallProgress::Verifying);
     let digest = run(
         Command::new("/usr/bin/shasum")
             .args(["-a", "256"])
@@ -466,6 +607,7 @@ fn install(release: &Release, bundle: &Path, current: &str) -> Result<(), String
         return Err("The downloaded installer did not match GitHub's checksum.".into());
     }
 
+    progress(InstallProgress::Replacing);
     let mount = download.path().join("mounted");
     fs::create_dir(&mount).map_err(|error| error.to_string())?;
     let replacement = stage.path().join(APP_NAME);
@@ -620,6 +762,7 @@ mod tests {
                 version: Version::new(major, 0, 0),
                 url: String::new(),
                 sha256: String::new(),
+                size: 1,
                 notes: String::new(),
             })
         };
@@ -649,7 +792,20 @@ mod tests {
 
         begin_check(&mut updates).send(release(2)).unwrap();
         click(&mut updates, "Update");
-        assert!(matches!(updates.state, State::Installing));
+        assert!(matches!(updates.state, State::Installing(_)));
+
+        let (sender, receiver) = mpsc::channel();
+        updates.result = Some(receiver);
+        sender
+            .send(State::Installing(InstallProgress::Downloading(0.42)))
+            .unwrap();
+        frame(&mut updates, vec![]);
+        assert!(frame(&mut updates, vec![]).shapes.iter().any(|shape| {
+            matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text() == "42%")
+        }));
+        sender.send(State::Error("Download failed".into())).unwrap();
+        frame(&mut updates, vec![]);
+        assert!(matches!(updates.state, State::Error(_)));
     }
 
     #[test]
@@ -675,7 +831,14 @@ mod tests {
             ),
         )
         .unwrap();
-        install(&release, &bundle, previous).unwrap();
+        let saw_download = std::cell::Cell::new(false);
+        install(&release, &bundle, previous, &|stage| {
+            if matches!(stage, InstallProgress::Downloading(fraction) if fraction > 0.0) {
+                saw_download.set(true);
+            }
+        })
+        .unwrap();
+        assert!(saw_download.get());
 
         assert_eq!(
             plist(&bundle, "CFBundleShortVersionString").unwrap(),
