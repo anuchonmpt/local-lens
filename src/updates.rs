@@ -76,8 +76,19 @@ impl Updates {
             _ => ("Update".into(), "Check for a newer version first."),
         };
         let available = matches!(self.state, State::Available(_));
+        let update_button = if available {
+            egui::Button::new(
+                egui::RichText::new(update_label)
+                    .strong()
+                    .color(egui::Color32::WHITE),
+            )
+            .fill(egui::Color32::from_rgb(32, 113, 68))
+            .min_size(egui::vec2(145.0, 34.0))
+        } else {
+            egui::Button::new(update_label)
+        };
         if ui
-            .add_enabled(available, egui::Button::new(update_label))
+            .add_enabled(available, update_button)
             .on_hover_text(update_hint)
             .on_disabled_hover_text(update_hint)
             .clicked()
@@ -133,20 +144,31 @@ impl Updates {
         let version =
             ui.painter()
                 .layout_no_wrap(label.into(), egui::FontId::proportional(11.0), color);
-        let arrow_space = if available { 12.0 } else { 0.0 };
-        let size = version.size() + egui::vec2(arrow_space, 0.0);
+        let padding = if available {
+            egui::vec2(7.0, 3.0)
+        } else {
+            egui::Vec2::ZERO
+        };
+        let arrow_space = if available { 15.0 } else { 0.0 };
+        let size = version.size() + 2.0 * padding + egui::vec2(arrow_space, 0.0);
         let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
         response.widget_info(|| {
             egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
         });
-        ui.painter().galley(rect.min, version, color);
         if available {
+            let fill = if response.hovered() {
+                egui::Color32::from_rgb(39, 75, 52)
+            } else {
+                egui::Color32::from_rgb(29, 57, 40)
+            };
+            ui.painter().rect_filled(rect, 5.0, fill);
             ui.painter().arrow(
-                rect.right_center() + egui::vec2(-5.0, 4.0),
+                rect.right_center() + egui::vec2(-10.0, 4.0),
                 egui::vec2(0.0, -8.0),
                 egui::Stroke::new(1.25_f32, color),
             );
         }
+        ui.painter().galley(rect.min + padding, version, color);
         response
             .on_hover_cursor(egui::CursorIcon::PointingHand)
             .on_hover_text(hint)
@@ -154,8 +176,24 @@ impl Updates {
     }
 
     pub fn show_settings(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Updates");
+        egui::Frame::new()
+            .fill(crate::PANEL)
+            .corner_radius(7.0)
+            .inner_margin(12.0)
+            .show(ui, |ui| {
+                ui.label(format!("Installed version v{VERSION}"));
+                if let State::Available(release) = &self.state {
+                    ui.label(
+                        egui::RichText::new(format!("Version v{} is available", release.version))
+                            .strong()
+                            .color(crate::GREEN),
+                    );
+                }
+                ui.horizontal(|ui| self.controls(ui));
+            });
+        ui.add_space(12.0);
         ui.heading("Changelog");
-        ui.horizontal(|ui| self.controls(ui));
         if let State::Available(release) = &self.state {
             if !release.notes.trim().is_empty() {
                 ui.collapsing(format!("What's New in v{}", release.version), |ui| {

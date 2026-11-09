@@ -8,6 +8,7 @@ mod kubernetes;
 mod kubeconfig_settings;
 mod workloads_overview;
 mod detail_metrics;
+mod env_secrets;
 #[cfg(target_os = "macos")]
 mod process_usage;
 #[cfg(target_os = "macos")]
@@ -368,6 +369,7 @@ struct Observatory {
     repaint: egui::Context,
     visualize: visualize::Visualize,
     detail_metrics: detail_metrics::Metrics,
+    env_secrets: env_secrets::EnvSecrets,
     #[cfg(target_os = "macos")]
     process_usage: process_usage::ProcessUsage,
     #[cfg(target_os = "macos")]
@@ -411,6 +413,7 @@ impl Observatory {
             table_sort: HashMap::new(),
             table_widths, table_widths_dir, pending_table_width: None,
             kubeconfig_settings, synced_contexts: Vec::new(),
+            env_secrets: Default::default(),
         };
         if demo { app.cluster_overview.record(&app.snapshot); }
         if let Some(target) = target {
@@ -1143,7 +1146,16 @@ impl Observatory {
 
     fn resource_details(&mut self, ui: &mut egui::Ui, resource: &Resource) {
         ui.spacing_mut().item_spacing.y = 3.0;
-        match resource_details::show(ui, &self.snapshot, resource, &mut self.detail_metrics, self.target.as_ref()) {
+        let target = self.target.as_ref();
+        let scope = (
+            &resource.kind, &resource.namespace, &resource.name,
+            resource.raw.pointer("/metadata/uid").and_then(Value::as_str),
+            target.map(|target| (&target.config, &target.context)),
+        );
+        let action = ui.push_id(scope, |ui| {
+            resource_details::show(ui, &self.snapshot, resource, &mut self.detail_metrics, target, &mut self.env_secrets)
+        }).inner;
+        match action {
             Some(resource_details::Action::Forward(port)) => {
                 self.remote_port = port;
                 self.local_port = port;
@@ -2294,6 +2306,7 @@ impl eframe::App for Observatory {
             self.log_dock(ctx);
             self.details(ctx);
         }
+        self.env_secrets.end_frame();
         if self.settings_page != Some(SettingsPage::Kubernetes) {
             self.kubeconfig_settings.clear_draft();
         }

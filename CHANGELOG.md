@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.12 · 2026-11-09
+
+- Display environment variables as compact name and value rows, with an eye button to reveal or hide referenced Secret values.
+- Highlight the Update button and footer version when a new release is available.
+
 ## 0.1.11 · 2026-11-09
 
 - Show environment values and their sources in Pod and workload container details.

@@ -2,6 +2,7 @@ use super::{
     array, egui, event_for, service_ports, service_type, status_color, text, Align, Resource,
     ResourceColumn, RichText, Snapshot, Vec2, MUTED, SIDE, TEXT,
 };
+use crate::env_secrets::EnvSecrets;
 use serde_json::Value;
 use time::OffsetDateTime;
 
@@ -294,6 +295,7 @@ pub(super) fn show<'a>(
     resource: &Resource,
     metrics: &mut super::detail_metrics::Metrics,
     target: Option<&super::Target>,
+    secrets: &mut EnvSecrets,
 ) -> Option<Action<'a>> {
     let raw = &resource.raw;
     let mut revisions: Vec<_> = if resource.kind == "Deployment" {
@@ -493,7 +495,7 @@ pub(super) fn show<'a>(
     );
 
     match resource.kind.as_str() {
-        "Pod" => open = pod_sections(ui, snapshot, resource).or(open),
+        "Pod" => open = pod_sections(ui, snapshot, resource, target, secrets).or(open),
         "Ingress" => ingress(ui, raw),
         "Deployment" => {
             section(ui, "Deploy Revisions");
@@ -567,7 +569,14 @@ pub(super) fn show<'a>(
                     ui.strong(name);
                     open = ui
                         .push_id((title, name), |ui| {
-                            container_environment(ui, snapshot, &resource.namespace, container)
+                            container_environment(
+                                ui,
+                                snapshot,
+                                &resource.namespace,
+                                container,
+                                target,
+                                secrets,
+                            )
                         })
                         .inner
                         .or(open);
@@ -606,6 +615,8 @@ fn pod_sections<'a>(
     ui: &mut egui::Ui,
     snapshot: &'a Snapshot,
     pod: &Resource,
+    target: Option<&super::Target>,
+    secrets: &mut EnvSecrets,
 ) -> Option<&'a Resource> {
     let raw = &pod.raw;
     let mut open = None;
@@ -684,7 +695,7 @@ fn pod_sections<'a>(
             row(ui, "Ports", ports.join(", "));
             open = ui
                 .push_id((title, &name), |ui| {
-                    container_environment(ui, snapshot, &pod.namespace, &container)
+                    container_environment(ui, snapshot, &pod.namespace, &container, target, secrets)
                 })
                 .inner
                 .or(open);
@@ -720,6 +731,8 @@ fn container_environment<'a>(
     snapshot: &'a Snapshot,
     namespace: &str,
     container: &Value,
+    target: Option<&super::Target>,
+    secrets: &mut EnvSecrets,
 ) -> Option<&'a Resource> {
     let vars = container["env"]
         .as_array()
@@ -752,9 +765,9 @@ fn container_environment<'a>(
         ))
         .id_salt("environment")
         .show(ui, |ui| {
-            for variable in vars {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            for (index, variable) in vars.iter().enumerate() {
                 let name = variable["name"].as_str().unwrap_or_default();
-                ui.add(egui::Label::new(RichText::new(name).strong().monospace()).wrap());
                 let from = &variable["valueFrom"];
                 if let Some((kind, selector)) = [
                     ("ConfigMap", &from["configMapKeyRef"]),
@@ -763,49 +776,35 @@ fn container_environment<'a>(
                 .into_iter()
                 .find(|(_, selector)| selector.is_object())
                 {
-                    open =
-                        environment_reference(ui, snapshot, namespace, kind, selector, "").or(open);
-                } else if let Some(field) =
-                    from.pointer("/fieldRef/fieldPath").and_then(Value::as_str)
-                {
-                    label(ui, format!("Pod field · {field}"));
-                } else if let Some(field) = from
-                    .pointer("/resourceFieldRef/resource")
-                    .and_then(Value::as_str)
-                {
-                    let container = from
-                        .pointer("/resourceFieldRef/containerName")
-                        .and_then(Value::as_str)
-                        .unwrap_or("this container");
-                    label(ui, format!("Container resource · {container} · {field}"));
-                } else if let Some(file) = from.get("fileKeyRef") {
-                    label(
-                        ui,
-                        format!(
-                            "File · {} · {} · {}",
-                            text(file, "/volumeName"),
-                            text(file, "/path"),
-                            text(file, "/key")
-                        ),
-                    );
-                } else if from.as_object().is_some_and(|source| !source.is_empty()) {
-                    label(ui, "Value from another source");
+                    open = ui
+                        .push_id(("env", index), |ui| {
+                            environment_reference(
+                                ui, snapshot, namespace, kind, selector, name, "", target, secrets,
+                            )
+                        })
+                        .inner
+                        .or(open);
                 } else {
-                    environment_value(ui, variable["value"].as_str().unwrap_or_default());
+                    let value = environment_description(variable);
+                    environment_line(ui, name, &value);
                 }
-                divider(ui);
             }
-            for source in sources {
+            for (index, source) in sources.iter().enumerate() {
                 let prefix = source["prefix"].as_str().unwrap_or_default();
                 for (kind, selector) in [
                     ("ConfigMap", &source["configMapRef"]),
                     ("Secret", &source["secretRef"]),
                 ] {
                     if selector.is_object() {
-                        open =
-                            environment_reference(ui, snapshot, namespace, kind, selector, prefix)
-                                .or(open);
-                        divider(ui);
+                        open = ui
+                            .push_id(("envFrom", index), |ui| {
+                                environment_reference(
+                                    ui, snapshot, namespace, kind, selector, "envFrom", prefix,
+                                    target, secrets,
+                                )
+                            })
+                            .inner
+                            .or(open);
                     }
                 }
             }
@@ -814,67 +813,100 @@ fn container_environment<'a>(
     open
 }
 
+fn environment_description(variable: &Value) -> String {
+    let from = &variable["valueFrom"];
+    if let Some(field) = from.pointer("/fieldRef/fieldPath").and_then(Value::as_str) {
+        format!("Pod field · {field}")
+    } else if let Some(field) = from
+        .pointer("/resourceFieldRef/resource")
+        .and_then(Value::as_str)
+    {
+        let container = from
+            .pointer("/resourceFieldRef/containerName")
+            .and_then(Value::as_str)
+            .unwrap_or("this container");
+        format!("Container resource · {container} · {field}")
+    } else if let Some(file) = from.get("fileKeyRef") {
+        format!(
+            "File · {} · {} · {}",
+            text(file, "/volumeName"),
+            text(file, "/path"),
+            text(file, "/key")
+        )
+    } else if from.as_object().is_some_and(|source| !source.is_empty()) {
+        "Value from another source".into()
+    } else {
+        variable["value"].as_str().unwrap_or_default().to_owned()
+    }
+}
+
 fn environment_reference<'a>(
     ui: &mut egui::Ui,
     snapshot: &'a Snapshot,
     namespace: &str,
     kind: &str,
     selector: &Value,
+    variable: &str,
     prefix: &str,
+    target: Option<&super::Target>,
+    secrets: &mut EnvSecrets,
 ) -> Option<&'a Resource> {
     let name = selector["name"].as_str().unwrap_or_default();
     let key = selector["key"].as_str();
-    let mut caption = format!("{kind} · {name}");
-    if let Some(key) = key {
-        caption.push_str(&format!(" · {key}"));
-    }
-    if !prefix.is_empty() {
-        caption.push_str(&format!(" · Prefix {prefix}"));
-    }
-    if selector["optional"] == true {
-        caption.push_str(" · Optional");
-    }
-    let target = reference(snapshot, kind, namespace, name);
-    let clicked = if target.is_some() {
-        ui.link(caption).clicked()
+    let resource = reference(snapshot, kind, namespace, name);
+    let data = (kind == "ConfigMap")
+        .then(|| resource.and_then(|item| item.raw["data"].as_object()))
+        .flatten();
+    let value = key.and_then(|key| data?.get(key)?.as_str());
+    let source = if kind == "Secret" {
+        "secret"
     } else {
-        label(ui, caption);
-        false
+        "configMap"
     };
-    if kind == "ConfigMap" {
-        if let Some(data) = target.and_then(|resource| resource.raw["data"].as_object()) {
-            if let Some(key) = key {
-                if let Some(value) = data.get(key).and_then(Value::as_str) {
-                    environment_value(ui, value);
-                }
-            } else {
-                for (key, value) in data {
-                    if let Some(value) = value.as_str() {
-                        ui.add(
-                            egui::Label::new(
-                                RichText::new(format!("{prefix}{key}")).strong().monospace(),
-                            )
-                            .wrap(),
-                        );
-                        environment_value(ui, value);
-                    }
-                }
+    let caption = format!("{source}({name})");
+    let mut clicked = false;
+    ui.horizontal_wrapped(|ui| {
+        if let Some(value) = value {
+            environment_line(ui, variable, value);
+        } else {
+            label(ui, format!("{variable} :"));
+        }
+        let hint = key.map_or_else(
+            || format!("{kind} {name}"),
+            |key| format!("{kind} {name} · {key}"),
+        );
+        if resource.is_some() {
+            clicked = ui.link(caption).on_hover_text(hint).clicked();
+        } else {
+            ui.label(caption).on_hover_text(hint);
+        }
+        if !prefix.is_empty() {
+            ui.label(format!("Prefix {prefix}"));
+        }
+        if selector["optional"] == true {
+            ui.label("Optional");
+        }
+        if kind == "Secret" {
+            secrets.show(ui, target, namespace, name, key, variable);
+        }
+    });
+    if key.is_none() {
+        for (key, value) in data.into_iter().flatten() {
+            if let Some(value) = value.as_str() {
+                environment_line(ui, &format!("{prefix}{key}"), value);
             }
         }
     }
-    target.filter(|_| clicked)
+    resource.filter(|_| clicked)
 }
 
-fn environment_value(ui: &mut egui::Ui, value: &str) {
-    if value.is_empty() {
-        ui.label(RichText::new("(empty)").color(MUTED));
-    } else {
-        ui.add(
-            egui::Label::new(RichText::new(value).monospace())
-                .wrap()
-                .selectable(true),
-        );
-    }
+fn environment_line(ui: &mut egui::Ui, name: &str, value: &str) {
+    let value = if value.is_empty() { "(empty)" } else { value };
+    ui.add(
+        egui::Label::new(RichText::new(format!("{name} : {value}")).color(MUTED))
+            .wrap()
+            .selectable(true),
+    );
 }
 
 fn service(ui: &mut egui::Ui, snapshot: &Snapshot, resource: &Resource) -> Option<u16> {
@@ -1416,7 +1448,8 @@ mod tests {
         });
         let ctx = egui::Context::default();
         ctx.style_mut(|style| style.animation_time = 0.0);
-        let frame = |events| {
+        let mut secrets = EnvSecrets::default();
+        let mut frame = |events| {
             ctx.run(
                 egui::RawInput {
                     events,
@@ -1424,7 +1457,14 @@ mod tests {
                 },
                 |ctx| {
                     egui::CentralPanel::default().show(ctx, |ui| {
-                        container_environment(ui, &snapshot, "test", &container);
+                        container_environment(
+                            ui,
+                            &snapshot,
+                            "test",
+                            &container,
+                            None,
+                            &mut secrets,
+                        );
                     });
                 },
             )
@@ -1456,12 +1496,12 @@ mod tests {
             })
             .collect();
         for expected in [
-            "8080",
-            "staging",
-            "APP_region",
-            "local",
-            "(empty)",
-            "Secret · auth · token",
+            "PORT : 8080",
+            "MODE : staging",
+            "APP_region : local",
+            "EMPTY : (empty)",
+            "TOKEN :",
+            "secret(auth)",
         ] {
             assert!(
                 labels.iter().any(|label| label == expected),
