@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.13 · 2026-11-09
+
+- Show revealed environment Secret values directly after the variable name, with the eye button at the end of the row.
+
 ## 0.1.12 · 2026-11-09
 
 - Display environment variables as compact name and value rows, with an eye button to reveal or hide referenced Secret values.

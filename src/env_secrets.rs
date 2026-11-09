@@ -31,10 +31,56 @@ impl EnvSecrets {
         secret: &str,
         key: Option<&str>,
         variable: &str,
+        source: impl FnOnce(&mut egui::Ui),
     ) {
         let id = ui.make_persistent_id((namespace, secret, key, variable));
         let shown = self.reveals.contains_key(&id);
         let tooltip = format!("{} {variable}", if shown { "Hide" } else { "Reveal" });
+        if let Some(reveal) = self.reveals.get_mut(&id) {
+            reveal.seen = true;
+            if reveal.value.is_none() {
+                match reveal.pending.try_recv() {
+                    Ok(value) => reveal.value = Some(value),
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        reveal.value = Some(Err("Could not load Secret.".into()))
+                    }
+                    Err(mpsc::TryRecvError::Empty) => {}
+                }
+            }
+        }
+        let value = self
+            .reveals
+            .get(&id)
+            .and_then(|reveal| reveal.value.as_ref());
+        if key.is_none() || !matches!(value, Some(Ok(_))) {
+            source(ui);
+        }
+        if shown {
+            match value {
+                None => {
+                    ui.spinner();
+                }
+                Some(Err(error)) => {
+                    ui.colored_label(crate::ORANGE, error);
+                }
+                Some(Ok(values)) => {
+                    for (name, value) in values {
+                        if key.is_none() {
+                            ui.strong(name);
+                        }
+                        let value = if value.is_empty() { "(empty)" } else { value };
+                        ui.add(
+                            egui::Label::new(egui::RichText::new(value).color(crate::MUTED))
+                                .wrap()
+                                .selectable(true),
+                        );
+                    }
+                    if values.is_empty() {
+                        ui.label("(no keys)");
+                    }
+                }
+            }
+        }
         if eye(
             ui,
             target.is_some() && !namespace.is_empty(),
@@ -43,6 +89,7 @@ impl EnvSecrets {
         ) {
             if shown {
                 self.reveals.remove(&id);
+                ui.ctx().request_repaint();
             } else if let Some(target) = target.cloned() {
                 let (sender, pending) = mpsc::channel();
                 let (namespace, secret, key) = (
@@ -63,43 +110,6 @@ impl EnvSecrets {
                         seen: true,
                     },
                 );
-            }
-        }
-
-        if let Some(reveal) = self.reveals.get_mut(&id) {
-            reveal.seen = true;
-            if reveal.value.is_none() {
-                match reveal.pending.try_recv() {
-                    Ok(value) => reveal.value = Some(value),
-                    Err(mpsc::TryRecvError::Disconnected) => {
-                        reveal.value = Some(Err("Could not load Secret.".into()))
-                    }
-                    Err(mpsc::TryRecvError::Empty) => {}
-                }
-            }
-            match &reveal.value {
-                None => {
-                    ui.spinner();
-                }
-                Some(Err(error)) => {
-                    ui.colored_label(crate::ORANGE, error);
-                }
-                Some(Ok(values)) => {
-                    for (name, value) in values {
-                        if key.is_none() {
-                            ui.strong(name);
-                        }
-                        let value = if value.is_empty() { "(empty)" } else { value };
-                        ui.add(
-                            egui::Label::new(egui::RichText::new(value).monospace())
-                                .wrap()
-                                .selectable(true),
-                        );
-                    }
-                    if values.is_empty() {
-                        ui.label("(no keys)");
-                    }
-                }
             }
         }
     }
@@ -238,24 +248,37 @@ mod tests {
                 },
                 |ctx| {
                     egui::CentralPanel::default().show(ctx, |ui| {
-                        secrets.show(ui, Some(&target), "test", "auth", Some("token"), "TOKEN");
+                        ui.horizontal(|ui| {
+                            ui.label("TOKEN :");
+                            secrets.show(
+                                ui,
+                                Some(&target),
+                                "test",
+                                "auth",
+                                Some("token"),
+                                "TOKEN",
+                                |ui| {
+                                    ui.label("secret(auth)");
+                                },
+                            );
+                        });
                     });
                     secrets.end_frame();
                 },
             )
         };
-        let pos = frame(&mut secrets, vec![])
-            .shapes
-            .into_iter()
-            .find_map(|shape| match shape.shape {
-                egui::Shape::Circle(circle) if (circle.radius - 1.8).abs() < 0.01 => {
-                    Some(circle.center)
-                }
-                _ => None,
-            })
-            .expect("eye button");
         assert!(secrets.reveals.is_empty());
         let click = |secrets: &mut EnvSecrets| {
+            let pos = frame(secrets, vec![])
+                .shapes
+                .into_iter()
+                .find_map(|shape| match shape.shape {
+                    egui::Shape::Circle(circle) if (circle.radius - 1.8).abs() < 0.01 => {
+                        Some(circle.center)
+                    }
+                    _ => None,
+                })
+                .expect("eye button");
             let event = |pressed| egui::Event::PointerButton {
                 pos,
                 button: egui::PointerButton::Primary,
@@ -273,6 +296,8 @@ mod tests {
                 matches!(&shape.shape,
                 egui::Shape::Text(text) if text.galley.text() == "fixture")
             }) {
+                assert!(!output.shapes.iter().any(|shape| matches!(&shape.shape,
+                    egui::Shape::Text(text) if text.galley.text() == "secret(auth)")));
                 break;
             }
             assert!(Instant::now() < deadline, "Secret value never appeared");

@@ -869,25 +869,29 @@ fn environment_reference<'a>(
         if let Some(value) = value {
             environment_line(ui, variable, value);
         } else {
-            label(ui, format!("{variable} :"));
+            ui.add(egui::Label::new(RichText::new(format!("{variable} :")).color(MUTED)).wrap());
         }
         let hint = key.map_or_else(
             || format!("{kind} {name}"),
             |key| format!("{kind} {name} · {key}"),
         );
-        if resource.is_some() {
-            clicked = ui.link(caption).on_hover_text(hint).clicked();
+        let source = |ui: &mut egui::Ui| {
+            if resource.is_some() {
+                clicked = ui.link(caption).on_hover_text(hint).clicked();
+            } else {
+                ui.label(caption).on_hover_text(hint);
+            }
+        };
+        if kind == "Secret" {
+            secrets.show(ui, target, namespace, name, key, variable, source);
         } else {
-            ui.label(caption).on_hover_text(hint);
+            source(ui);
         }
         if !prefix.is_empty() {
             ui.label(format!("Prefix {prefix}"));
         }
         if selector["optional"] == true {
             ui.label("Optional");
-        }
-        if kind == "Secret" {
-            secrets.show(ui, target, namespace, name, key, variable);
         }
     });
     if key.is_none() {
