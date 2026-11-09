@@ -57,11 +57,11 @@ impl EnvSecrets {
 
     pub fn keys(
         &mut self,
-        ui: &mut egui::Ui,
+        ui: &egui::Ui,
         target: &Target,
         namespace: &str,
         secret: &str,
-    ) -> &[String] {
+    ) -> Option<Result<&[String], &str>> {
         let id = ui.make_persistent_id(("secret-keys", namespace, secret));
         let request = self.key_lists.entry(id).or_insert_with(|| {
             let (target, namespace, secret) =
@@ -78,20 +78,10 @@ impl EnvSecrets {
             })
         });
         request.poll();
-        match request.value.as_ref() {
-            Some(Ok(keys)) => keys,
-            Some(Err(error)) => {
-                ui.colored_label(crate::ORANGE, format!("secret({secret}) · {error}"));
-                &[]
-            }
-            None => {
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label(format!("Loading keys from secret({secret})…"));
-                });
-                &[]
-            }
-        }
+        request
+            .value
+            .as_ref()
+            .map(|result| result.as_ref().map(Vec::as_slice).map_err(String::as_str))
     }
 
     pub fn show(
@@ -284,7 +274,11 @@ esac
                 },
                 |ctx| {
                     egui::CentralPanel::default().show(ctx, |ui| {
-                        let keys = secrets.keys(ui, &target, "test", "auth").to_vec();
+                        let keys = secrets
+                            .keys(ui, &target, "test", "auth")
+                            .and_then(Result::ok)
+                            .unwrap_or_default()
+                            .to_vec();
                         for key in keys {
                             ui.push_id(&key, |ui| {
                                 ui.horizontal(|ui| {

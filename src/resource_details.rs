@@ -748,116 +748,123 @@ fn container_environment<'a>(
 
     let mut open = None;
     property(ui, "Environment", |ui| {
-        let variable_label = if vars.len() == 1 {
-            "variable"
+        let explicit: std::collections::HashMap<_, _> = vars
+            .iter()
+            .enumerate()
+            .filter_map(|(index, variable)| Some((variable["name"].as_str()?, index)))
+            .collect();
+        let mut imported = std::collections::BTreeMap::new();
+        let mut pending = false;
+        let mut unavailable = Vec::new();
+        for source in sources {
+            let prefix = source["prefix"].as_str().unwrap_or_default();
+            for (kind, selector) in [
+                ("ConfigMap", &source["configMapRef"]),
+                ("Secret", &source["secretRef"]),
+            ] {
+                let Some(name) = selector["name"].as_str() else {
+                    continue;
+                };
+                let mut add_key = |key: &str| {
+                    let variable = format!("{prefix}{key}");
+                    if !explicit.contains_key(variable.as_str()) {
+                        // Later envFrom sources override earlier ones.
+                        imported.insert(variable, (kind, selector, key.to_owned()));
+                    }
+                };
+                if kind == "Secret" {
+                    match target.map(|target| secrets.keys(ui, target, namespace, name)) {
+                        Some(Some(Ok(keys))) => keys.iter().for_each(|key| add_key(key)),
+                        Some(None) => pending = true,
+                        Some(Some(Err(error))) => {
+                            unavailable.push(format!("secret({name}) · {error}"))
+                        }
+                        None => unavailable.push(format!("secret({name}) · Keys unavailable")),
+                    }
+                } else if let Some(resource) = reference(snapshot, kind, namespace, name) {
+                    if let Some(data) = resource.raw["data"].as_object() {
+                        for (key, value) in data {
+                            if value.is_string() {
+                                add_key(key);
+                            }
+                        }
+                    }
+                } else {
+                    unavailable.push(format!("configMap({name}) · Keys unavailable"));
+                }
+            }
+        }
+        let count = explicit.len() + imported.len();
+        let noun = if count == 1 { "variable" } else { "variables" };
+        let title = if pending {
+            "Counting variables…".to_owned()
+        } else if !unavailable.is_empty() {
+            format!("{count} known {noun}")
         } else {
-            "variables"
+            format!("{count} {noun}")
         };
-        let source_label = if sources.len() == 1 {
-            "source"
-        } else {
-            "sources"
-        };
-        egui::CollapsingHeader::new(format!(
-            "{} {variable_label} · {} {source_label}",
-            vars.len(),
-            sources.len()
-        ))
-        .id_salt("environment")
-        .show(ui, |ui| {
-            ui.spacing_mut().item_spacing.x = 4.0;
-            for (index, variable) in vars.iter().enumerate() {
-                let name = variable["name"].as_str().unwrap_or_default();
-                let from = &variable["valueFrom"];
-                if let Some((kind, selector)) = [
-                    ("ConfigMap", &from["configMapKeyRef"]),
-                    ("Secret", &from["secretKeyRef"]),
-                ]
-                .into_iter()
-                .find(|(_, selector)| selector.is_object())
-                {
+        egui::CollapsingHeader::new(title)
+            .id_salt("environment")
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                for (index, variable) in vars.iter().enumerate() {
+                    let Some(name) = variable["name"].as_str() else {
+                        continue;
+                    };
+                    if explicit.get(name) != Some(&index) {
+                        continue;
+                    }
+                    let from = &variable["valueFrom"];
+                    if let Some((kind, selector)) = [
+                        ("ConfigMap", &from["configMapKeyRef"]),
+                        ("Secret", &from["secretKeyRef"]),
+                    ]
+                    .into_iter()
+                    .find(|(_, selector)| selector.is_object())
+                    {
+                        open = ui
+                            .push_id(("env", index), |ui| {
+                                environment_reference(
+                                    ui,
+                                    snapshot,
+                                    namespace,
+                                    kind,
+                                    selector,
+                                    name,
+                                    selector["key"].as_str(),
+                                    target,
+                                    secrets,
+                                )
+                            })
+                            .inner
+                            .or(open);
+                    } else {
+                        let value = environment_description(variable);
+                        environment_line(ui, name, &value);
+                    }
+                }
+                for message in unavailable {
+                    ui.colored_label(super::ORANGE, message);
+                }
+                for (variable, (kind, selector, key)) in imported {
                     open = ui
-                        .push_id(("env", index), |ui| {
+                        .push_id(("envFrom", &variable, &key), |ui| {
                             environment_reference(
                                 ui,
                                 snapshot,
                                 namespace,
                                 kind,
                                 selector,
-                                name,
-                                selector["key"].as_str(),
+                                &variable,
+                                Some(&key),
                                 target,
                                 secrets,
                             )
                         })
                         .inner
                         .or(open);
-                } else {
-                    let value = environment_description(variable);
-                    environment_line(ui, name, &value);
                 }
-            }
-            let explicit: std::collections::HashSet<_> = vars
-                .iter()
-                .filter_map(|variable| variable["name"].as_str())
-                .collect();
-            let mut imported = std::collections::BTreeMap::new();
-            for source in sources {
-                let prefix = source["prefix"].as_str().unwrap_or_default();
-                for (kind, selector) in [
-                    ("ConfigMap", &source["configMapRef"]),
-                    ("Secret", &source["secretRef"]),
-                ] {
-                    let Some(name) = selector["name"].as_str() else {
-                        continue;
-                    };
-                    let mut add_key = |key: &str| {
-                        let variable = format!("{prefix}{key}");
-                        if !explicit.contains(variable.as_str()) {
-                            // Later envFrom sources override earlier ones.
-                            imported.insert(variable, (kind, selector, key.to_owned()));
-                        }
-                    };
-                    if kind == "Secret" {
-                        if let Some(target) = target {
-                            for key in secrets.keys(ui, target, namespace, name) {
-                                add_key(key);
-                            }
-                        } else {
-                            label(ui, format!("secret({name}) · Keys unavailable"));
-                        }
-                    } else if let Some(data) = reference(snapshot, kind, namespace, name)
-                        .and_then(|resource| resource.raw["data"].as_object())
-                    {
-                        for (key, value) in data {
-                            if value.is_string() {
-                                add_key(key);
-                            }
-                        }
-                    } else {
-                        label(ui, format!("configMap({name}) · Keys unavailable"));
-                    }
-                }
-            }
-            for (variable, (kind, selector, key)) in imported {
-                open = ui
-                    .push_id(("envFrom", &variable, &key), |ui| {
-                        environment_reference(
-                            ui,
-                            snapshot,
-                            namespace,
-                            kind,
-                            selector,
-                            &variable,
-                            Some(&key),
-                            target,
-                            secrets,
-                        )
-                    })
-                    .inner
-                    .or(open);
-            }
-        });
+            });
     });
     open
 }
@@ -1484,7 +1491,8 @@ mod tests {
                 {"name":"PORT","value":"8080"},
                 {"name":"MODE","valueFrom":{"configMapKeyRef":{"name":"app","key":"mode"}}},
                 {"name":"TOKEN","valueFrom":{"secretKeyRef":{"name":"auth","key":"token"}}},
-                {"name":"EMPTY"}
+                {"name":"EMPTY"},
+                {"name":"APP_mode","value":"override"}
             ],
             "envFrom": [{"prefix":"APP_","configMapRef":{"name":"app"}}]
         });
@@ -1515,7 +1523,7 @@ mod tests {
             .shapes
             .into_iter()
             .find_map(|shape| match shape.shape {
-                egui::Shape::Text(text) if text.galley.text() == "4 variables · 1 source" => {
+                egui::Shape::Text(text) if text.galley.text() == "6 variables" => {
                     Some(text.pos + text.galley.size() / 2.0)
                 }
                 _ => None,
@@ -1541,6 +1549,7 @@ mod tests {
             "PORT : 8080",
             "MODE : staging",
             "APP_region : local",
+            "APP_mode : override",
             "EMPTY : (empty)",
             "TOKEN :",
             "secret(auth)",
@@ -1550,6 +1559,8 @@ mod tests {
                 "missing {expected}: {labels:?}"
             );
         }
-        assert!(!labels.iter().any(|label| label.contains("secret-fixture")));
+        assert!(!labels
+            .iter()
+            .any(|label| label.contains("secret-fixture") || label == "APP_mode : staging"));
     }
 }

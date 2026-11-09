@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.15 · 2026-11-09
+
+- Show one environment variable count that includes keys imported from ConfigMaps and Secrets, counting duplicate names once.
+
 ## 0.1.14 · 2026-11-09
 
 - Show each variable imported through envFrom on its own row, with a separate reveal button for every Secret key.
