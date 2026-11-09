@@ -402,13 +402,13 @@ impl Observatory {
         let settings_dir = shot.is_none().then(app_config_dir).flatten();
         let table_widths_dir = settings_dir.as_ref().map(|dir| dir.join("column-widths"));
         let table_widths = table_widths_dir.as_deref().map(read_table_widths).unwrap_or_default();
-        let kubeconfig_settings = kubeconfig_settings::KubeconfigSettings::load(settings_dir);
+        let kubeconfig_settings = kubeconfig_settings::KubeconfigSettings::load(settings_dir.clone());
         let mut app = Self{snapshot,demo,page:"Overview".into(),namespace:if demo { ALL_NAMESPACES.into() } else { String::new() },search:String::new(),cluster_overview: Default::default(),selected:None,detail_tab:"Details".into(),settings_page:None,contexts:vec![],context:String::new(),exe:default_kubectl(),kubeconfig:String::new(),tx,rx,busy:false,last_refresh:Instant::now(),output:String::new(),command:"get pods -A".into(),console:false,notice:String::new(),confirm:None,replicas:2,shot,frames:0,shot_requested:false,nav_open:HashMap::new(),
             target: None, fetch_cancel: None, repaint: cc.egui_ctx.clone(), visualize: Default::default(), detail_metrics: Default::default(), manifest: None, container: String::new(),
             #[cfg(target_os = "macos")]
             process_usage: Default::default(),
             #[cfg(target_os = "macos")]
-            updates: Default::default(),
+            updates: updates::Updates::load(settings_dir.as_deref()),
             pod_logs: None, forwards: Vec::new(), local_port: 8080, remote_port: 80,
             table_sort: HashMap::new(),
             table_widths, table_widths_dir, pending_table_width: None,
@@ -2327,6 +2327,8 @@ impl eframe::App for Observatory {
                 egui::ScrollArea::vertical().id_salt("main-scroll").show(ui, |ui| self.workspace(ui));
             }
         });
+        #[cfg(target_os = "macos")]
+        self.updates.dialog(ctx);
         if !ctx.input(|input| input.pointer.primary_down()) {
             self.save_pending_table_width();
         }

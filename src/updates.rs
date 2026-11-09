@@ -32,6 +32,7 @@ enum State {
     Checking,
     Current,
     Available(Release),
+    Skipped(Version),
     Installing,
     Restarting,
     RestartRequired(String),
@@ -42,12 +43,31 @@ enum State {
 pub struct Updates {
     state: State,
     result: Option<mpsc::Receiver<State>>,
+    show_result: bool,
+    skip_file: Option<PathBuf>,
+    skipped: Option<Version>,
 }
 
 impl Updates {
+    pub fn load(settings_dir: Option<&Path>) -> Self {
+        let skip_file = settings_dir.map(|dir| dir.join("skipped-update-version"));
+        let skipped = skip_file
+            .as_ref()
+            .and_then(|path| fs::read_to_string(path).ok())
+            .and_then(|version| Version::parse(version.trim()).ok());
+        Self {
+            skip_file,
+            skipped,
+            ..Self::default()
+        }
+    }
+
     pub fn poll(&mut self, ctx: &egui::Context) {
         let Some(receiver) = &self.result else { return };
         self.state = match receiver.try_recv() {
+            Ok(State::Available(release)) if self.skipped.as_ref() == Some(&release.version) => {
+                State::Skipped(release.version)
+            }
             Ok(state) => state,
             Err(mpsc::TryRecvError::Disconnected) => {
                 State::Error("The update task stopped unexpectedly.".into())
@@ -60,85 +80,22 @@ impl Updates {
         }
     }
 
-    fn controls(&mut self, ui: &mut egui::Ui) {
-        let (update_label, update_hint) = match &self.state {
-            State::Available(release) => (
-                format!("Update to v{}", release.version),
-                "Install the update and reopen the app.",
-            ),
-            State::Installing => ("Updating…".into(), "Downloading and installing the update."),
-            State::Restarting => ("Restarting…".into(), "Opening the new version."),
-            State::RestartRequired(_) => (
-                "Restart needed".into(),
-                "The update was installed. Quit and reopen the app.",
-            ),
-            State::Current => ("Update".into(), "You're up to date."),
-            _ => ("Update".into(), "Check for a newer version first."),
-        };
-        let available = matches!(self.state, State::Available(_));
-        let update_button = if available {
-            egui::Button::new(
-                egui::RichText::new(update_label)
-                    .strong()
-                    .color(egui::Color32::WHITE),
-            )
-            .fill(egui::Color32::from_rgb(32, 113, 68))
-            .min_size(egui::vec2(145.0, 34.0))
-        } else {
-            egui::Button::new(update_label)
-        };
-        if ui
-            .add_enabled(available, update_button)
-            .on_hover_text(update_hint)
-            .on_disabled_hover_text(update_hint)
-            .clicked()
-        {
-            if let State::Available(release) = &self.state {
-                let release = release.clone();
-                self.start(ui.ctx(), State::Installing, move || {
-                    let bundle = running_bundle()?;
-                    install(&release, &bundle, VERSION)?;
-                    Ok(match restart(&bundle) {
-                        Ok(()) => State::Restarting,
-                        Err(error) => State::RestartRequired(format!(
-                            "The update was installed. Quit and reopen the app. ({error})"
-                        )),
-                    })
-                });
-            }
-        }
-
-        let (check_label, check_hint) = match &self.state {
-            State::Checking => ("Checking…", "Checking GitHub Releases."),
-            State::Current => ("Up to date", "You're up to date. Click to check again."),
-            State::Error(error) => ("Retry", error.as_str()),
-            State::RestartRequired(error) => ("Check", error.as_str()),
-            _ => ("Check", "Check for updates."),
-        };
-        let can_check = !matches!(self.state, State::Restarting | State::RestartRequired(_))
-            && self.result.is_none();
-        if ui
-            .add_enabled(can_check, egui::Button::new(check_label))
-            .on_hover_text(check_hint)
-            .on_disabled_hover_text(check_hint)
-            .clicked()
-        {
-            self.check_for_updates(ui.ctx());
-        }
-    }
-
     pub fn check_for_updates(&mut self, ctx: &egui::Context) {
-        self.start(ctx, State::Checking, || {
-            Ok(check(VERSION)?.map_or(State::Current, State::Available))
-        });
+        if self.result.is_none() {
+            self.start(ctx, State::Checking, || {
+                Ok(check(VERSION)?.map_or(State::Current, State::Available))
+            });
+        }
     }
 
-    pub fn footer(&self, ui: &mut egui::Ui) -> bool {
+    pub fn footer(&mut self, ui: &mut egui::Ui) -> bool {
         let available = matches!(self.state, State::Available(_));
         let (color, hint) = if available {
-            (crate::GREEN, "Update available · View changelog")
+            (crate::GREEN, "Update available · Version menu")
+        } else if matches!(self.state, State::Checking) {
+            (crate::MUTED, "Checking for updates…")
         } else {
-            (crate::MUTED, "View changelog")
+            (crate::MUTED, "Version menu")
         };
         let label = concat!("v", env!("CARGO_PKG_VERSION"));
         let version =
@@ -169,29 +126,157 @@ impl Updates {
             );
         }
         ui.painter().galley(rect.min + padding, version, color);
-        response
+        let response = response
             .on_hover_cursor(egui::CursorIcon::PointingHand)
-            .on_hover_text(hint)
-            .clicked()
+            .on_hover_text(hint);
+        let menu = ui.make_persistent_id("version-menu");
+        if response.clicked() {
+            ui.memory_mut(|memory| memory.toggle_popup(menu));
+        }
+        egui::popup::popup_above_or_below_widget(
+            ui,
+            menu,
+            &response,
+            egui::AboveOrBelow::Above,
+            egui::PopupCloseBehavior::CloseOnClickOutside,
+            |ui| {
+                ui.set_min_width(155.0);
+                let can_check = !matches!(
+                    self.state,
+                    State::Installing | State::Restarting | State::RestartRequired(_)
+                );
+                let check_label = if self.show_result && matches!(self.state, State::Checking) {
+                    "Checking…"
+                } else {
+                    "Check Update"
+                };
+                if ui
+                    .add_enabled(
+                        can_check && check_label == "Check Update",
+                        egui::Button::new(check_label),
+                    )
+                    .clicked()
+                {
+                    ui.memory_mut(|memory| memory.close_popup());
+                    self.show_result = true;
+                    self.check_for_updates(ui.ctx());
+                }
+                if ui.button("View Changelog").clicked() {
+                    ui.memory_mut(|memory| memory.close_popup());
+                    return true;
+                }
+                false
+            },
+        )
+        .unwrap_or(false)
     }
 
-    pub fn show_settings(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Updates");
-        egui::Frame::new()
-            .fill(crate::PANEL)
-            .corner_radius(7.0)
-            .inner_margin(12.0)
-            .show(ui, |ui| {
-                ui.label(format!("Installed version v{VERSION}"));
-                if let State::Available(release) = &self.state {
-                    ui.label(
-                        egui::RichText::new(format!("Version v{} is available", release.version))
-                            .strong()
-                            .color(crate::GREEN),
-                    );
+    pub fn dialog(&mut self, ctx: &egui::Context) {
+        if !self.show_result || matches!(self.state, State::Checking | State::Restarting) {
+            return;
+        }
+        let modal = egui::Modal::new(egui::Id::new("update-result")).show(ctx, |ui| {
+            ui.set_width(420.0);
+            if let State::Available(release) = &self.state {
+                ui.heading(format!("Version v{} is available", release.version));
+                ui.label("Update Cluster Observatory now?");
+                if !release.notes.trim().is_empty() {
+                    egui::ScrollArea::vertical()
+                        .max_height(220.0)
+                        .show(ui, |ui| {
+                            show_changelog(ui, &release.notes);
+                        });
                 }
-                ui.horizontal(|ui| self.controls(ui));
-            });
+                ui.add_space(10.0);
+                let (update, skip, cancel) = ui
+                    .horizontal(|ui| {
+                        let update = egui::Button::new(
+                            egui::RichText::new("Update")
+                                .strong()
+                                .color(egui::Color32::WHITE),
+                        )
+                        .fill(egui::Color32::from_rgb(32, 113, 68))
+                        .min_size(egui::vec2(100.0, 32.0));
+                        (
+                            ui.add(update).clicked(),
+                            ui.button("Skip Version").clicked(),
+                            ui.button("Cancel").clicked(),
+                        )
+                    })
+                    .inner;
+                if update {
+                    self.install_update(ctx, release.clone());
+                } else if skip {
+                    let version = release.version.clone();
+                    self.state = match self.skip_version(&version) {
+                        Ok(()) => {
+                            self.show_result = false;
+                            State::Skipped(version)
+                        }
+                        Err(error) => {
+                            State::Error(format!("Could not save skipped version: {error}"))
+                        }
+                    };
+                }
+                return cancel;
+            }
+
+            ui.heading("Check Update");
+            match &self.state {
+                State::Current => {
+                    ui.label(format!("You're up to date on v{VERSION}."));
+                }
+                State::Skipped(version) => {
+                    ui.label(format!("Version v{version} was skipped."));
+                }
+                State::Installing => {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("Downloading and installing the update…");
+                    });
+                    return false;
+                }
+                State::RestartRequired(message) | State::Error(message) => {
+                    ui.label(message);
+                }
+                _ => {}
+            }
+            ui.button("OK").clicked()
+        });
+        if !matches!(self.state, State::Installing) && (modal.inner || modal.should_close()) {
+            self.show_result = false;
+        }
+    }
+
+    fn skip_version(&mut self, version: &Version) -> io::Result<()> {
+        if let Some(path) = &self.skip_file {
+            let dir = path
+                .parent()
+                .expect("skip file is under the settings directory");
+            fs::create_dir_all(dir)?;
+            let file = tempfile::NamedTempFile::new_in(dir)?;
+            fs::write(file.path(), version.to_string())?;
+            file.persist(path)?;
+        }
+        self.skipped = Some(version.clone());
+        Ok(())
+    }
+
+    fn install_update(&mut self, ctx: &egui::Context, release: Release) {
+        self.start(ctx, State::Installing, move || {
+            let bundle = running_bundle()?;
+            install(&release, &bundle, VERSION)?;
+            Ok(match restart(&bundle) {
+                Ok(()) => State::Restarting,
+                Err(error) => State::RestartRequired(format!(
+                    "The update was installed. Quit and reopen the app. ({error})"
+                )),
+            })
+        });
+    }
+
+    pub fn show_settings(&self, ui: &mut egui::Ui) {
+        ui.label(format!("Installed version v{VERSION}"));
         ui.add_space(12.0);
         ui.heading("Changelog");
         if let State::Available(release) = &self.state {
@@ -472,32 +557,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn footer_opens_update_controls_and_marks_an_available_update() {
+    fn version_menu_checks_and_distinguishes_cancel_from_skip() {
         let ctx = egui::Context::default();
-        let mut updates = Updates {
-            state: State::Current,
-            ..Default::default()
-        };
-        let settings_open = std::cell::Cell::new(false);
+        let dir = tempfile::tempdir().unwrap();
+        let mut updates = Updates::load(Some(dir.path()));
+        let changelog_open = std::cell::Cell::new(false);
         let frame = |updates: &mut Updates, events| {
             ctx.run(
                 egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(800.0, 600.0),
+                    )),
                     events,
                     ..Default::default()
                 },
                 |ctx| {
-                    egui::CentralPanel::default().show(ctx, |ui| {
-                        if ui.horizontal(|ui| updates.footer(ui)).inner {
-                            settings_open.set(true);
-                        }
-                        if settings_open.get() {
-                            updates.show_settings(ui);
-                        }
+                    updates.poll(ctx);
+                    egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if updates.footer(ui) {
+                                changelog_open.set(true);
+                            }
+                        });
                     });
+                    updates.dialog(ctx);
                 },
             )
         };
         let click = |updates: &mut Updates, label| {
+            frame(updates, vec![]);
             let pos = frame(updates, vec![])
                 .shapes
                 .into_iter()
@@ -507,7 +596,7 @@ mod tests {
                     }
                     _ => None,
                 })
-                .expect("update button label");
+                .unwrap_or_else(|| panic!("missing button: {label}"));
             let button = |pressed| egui::Event::PointerButton {
                 pos,
                 button: egui::PointerButton::Primary,
@@ -517,29 +606,49 @@ mod tests {
             frame(updates, vec![egui::Event::PointerMoved(pos), button(true)]);
             frame(updates, vec![button(false)]);
         };
+        let version_label = concat!("v", env!("CARGO_PKG_VERSION"));
+        let begin_check = |updates: &mut Updates| {
+            let (sender, receiver) = mpsc::channel();
+            updates.state = State::Checking;
+            updates.result = Some(receiver);
+            click(updates, version_label);
+            click(updates, "Check Update");
+            sender
+        };
+        let release = |major| {
+            State::Available(Release {
+                version: Version::new(major, 0, 0),
+                url: String::new(),
+                sha256: String::new(),
+                notes: String::new(),
+            })
+        };
 
-        assert!(!frame(&mut updates, vec![]).shapes.iter().any(|shape| {
-            matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text() == "Update")
-        }));
-        click(&mut updates, concat!("v", env!("CARGO_PKG_VERSION")));
-        assert!(settings_open.get());
-        click(&mut updates, "Update");
-        assert!(matches!(updates.state, State::Current));
-        settings_open.set(false);
+        click(&mut updates, version_label);
+        click(&mut updates, "View Changelog");
+        assert!(changelog_open.get());
 
-        updates.state = State::Available(Release {
-            version: Version::new(1, 0, 0),
-            url: String::new(),
-            sha256: String::new(),
-            notes: String::new(),
-        });
+        begin_check(&mut updates).send(release(1)).unwrap();
+        click(&mut updates, "Cancel");
+        assert!(matches!(updates.state, State::Available(_)));
+        assert!(!updates.show_result);
         assert!(frame(&mut updates, vec![]).shapes.iter().any(|shape| {
             matches!(shape.shape, egui::Shape::LineSegment { points: [from, to], stroke }
                 if stroke.color == crate::GREEN && from.x == to.x && from.y > to.y)
         }));
-        click(&mut updates, concat!("v", env!("CARGO_PKG_VERSION")));
-        assert!(settings_open.get());
-        click(&mut updates, "Update to v1.0.0");
+
+        begin_check(&mut updates).send(release(1)).unwrap();
+        click(&mut updates, "Skip Version");
+        assert!(matches!(updates.state, State::Skipped(_)));
+        assert!(!updates.show_result);
+
+        let mut updates = Updates::load(Some(dir.path()));
+        begin_check(&mut updates).send(release(1)).unwrap();
+        click(&mut updates, "OK");
+        assert!(matches!(updates.state, State::Skipped(_)));
+
+        begin_check(&mut updates).send(release(2)).unwrap();
+        click(&mut updates, "Update");
         assert!(matches!(updates.state, State::Installing));
     }
 

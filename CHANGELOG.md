@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.17 · 2026-11-09
+
+- Open Check Update and View Changelog from the version menu. When an update is available, install it, skip that version, or cancel.
+
 ## 0.1.16 · 2026-11-09
 
 - Show Secret data in Base64 with a per-key toggle for decoded text, like Lens.
