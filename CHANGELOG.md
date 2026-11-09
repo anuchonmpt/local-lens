@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.16 · 2026-11-09
+
+- Show Secret data in Base64 with a per-key toggle for decoded text, like Lens.
+
 ## 0.1.15 · 2026-11-09
 
 - Show one environment variable count that includes keys imported from ConfigMaps and Secrets, counting duplicate names once.

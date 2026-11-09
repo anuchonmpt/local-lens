@@ -1,7 +1,11 @@
-use crate::kubernetes::Target;
+use crate::{kubernetes::Target, Resource};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use eframe::egui;
-use std::{collections::HashMap, sync::mpsc, thread};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::mpsc,
+    thread,
+};
 
 struct Request<T> {
     pending: mpsc::Receiver<Result<T, String>>,
@@ -45,6 +49,12 @@ impl<T: Send + 'static> Request<T> {
 pub(super) struct EnvSecrets {
     reveals: HashMap<egui::Id, Request<String>>,
     key_lists: HashMap<egui::Id, Request<Vec<String>>>,
+    details: HashMap<egui::Id, Request<SecretData>>,
+}
+
+struct SecretData {
+    encoded: BTreeMap<String, String>,
+    decoded: HashMap<String, Result<Option<String>, String>>,
 }
 
 impl EnvSecrets {
@@ -53,6 +63,65 @@ impl EnvSecrets {
             .retain(|_, request| std::mem::take(&mut request.seen));
         self.key_lists
             .retain(|_, request| std::mem::take(&mut request.seen));
+        self.details
+            .retain(|_, request| std::mem::take(&mut request.seen));
+    }
+
+    pub fn show_data(&mut self, ui: &mut egui::Ui, target: Option<&Target>, secret: &Resource) {
+        let Some(target) = target else {
+            ui.label("Connect to a cluster to read Secret data.");
+            return;
+        };
+        let id = ui.make_persistent_id((
+            "secret-data",
+            &target.config,
+            &target.context,
+            &secret.namespace,
+            &secret.name,
+            secret
+                .raw
+                .pointer("/metadata/uid")
+                .and_then(serde_json::Value::as_str),
+        ));
+        let request = self.details.entry(id).or_insert_with(|| {
+            let target = target.clone();
+            let secret = secret.clone();
+            Request::start(ui.ctx(), move || {
+                let output = secret_output(&target, &secret.namespace, &secret.name, "json")?;
+                let mut loaded: serde_json::Value =
+                    serde_json::from_str(&output).map_err(|_| "Invalid Secret response.")?;
+                if !super::same_object(&secret.raw, &loaded) {
+                    return Err("This Secret changed. Refresh and reopen its details.".into());
+                }
+                let encoded = match loaded.get_mut("data").map(serde_json::Value::take) {
+                    None | Some(serde_json::Value::Null) => BTreeMap::new(),
+                    Some(data) => {
+                        serde_json::from_value(data).map_err(|_| "Invalid Secret data.")?
+                    }
+                };
+                Ok(SecretData {
+                    encoded,
+                    decoded: HashMap::new(),
+                })
+            })
+        });
+        request.poll();
+        match request.value.as_mut() {
+            None => {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label("Loading Secret data…");
+                });
+            }
+            Some(Err(error)) => {
+                ui.colored_label(crate::ORANGE, error.as_str());
+                if ui.button("Retry").clicked() {
+                    self.details.remove(&id);
+                    ui.ctx().request_repaint();
+                }
+            }
+            Some(Ok(data)) => data.show(ui),
+        }
     }
 
     pub fn keys(
@@ -151,6 +220,57 @@ impl EnvSecrets {
     }
 }
 
+impl SecretData {
+    fn show(&mut self, ui: &mut egui::Ui) {
+        if self.encoded.is_empty() {
+            ui.label("No data keys.");
+        }
+        for (key, encoded) in &self.encoded {
+            ui.push_id(key, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.colored_label(crate::MUTED, key);
+                    let shown = self.decoded.contains_key(key);
+                    let hint = if shown { "Show Base64 for" } else { "Decode" };
+                    if eye(ui, true, shown, &format!("{hint} {key}")) {
+                        if shown {
+                            self.decoded.remove(key);
+                        } else {
+                            self.decoded.insert(key.clone(), decode_base64(encoded));
+                        }
+                    }
+                });
+                let value = match self.decoded.get(key) {
+                    Some(Ok(Some(value))) => value,
+                    Some(Ok(None)) => {
+                        ui.colored_label(crate::MUTED, "Binary data · shown as Base64");
+                        encoded
+                    }
+                    Some(Err(error)) => {
+                        ui.colored_label(crate::ORANGE, error);
+                        encoded
+                    }
+                    None => encoded,
+                };
+                let value = if value.is_empty() { "(empty)" } else { value };
+                egui::Frame::new()
+                    .fill(crate::BG)
+                    .stroke(egui::Stroke::new(1.0_f32, crate::BORDER))
+                    .corner_radius(3.0)
+                    .inner_margin(7.0)
+                    .show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
+                        ui.add(
+                            egui::Label::new(egui::RichText::new(value).monospace())
+                                .wrap()
+                                .selectable(true),
+                        );
+                    });
+                ui.add_space(6.0);
+            });
+        }
+    }
+}
+
 fn secret_output(
     target: &Target,
     namespace: &str,
@@ -179,10 +299,14 @@ fn decode_secret(output: &str) -> Result<String, String> {
     let encoded = output
         .strip_suffix('\n')
         .ok_or("Key not found in Secret.")?;
+    Ok(decode_base64(encoded)?.unwrap_or_else(|| "(non-text value)".into()))
+}
+
+fn decode_base64(encoded: &str) -> Result<Option<String>, String> {
     let bytes = STANDARD
         .decode(encoded)
-        .map_err(|_| "Invalid Secret value.")?;
-    Ok(String::from_utf8(bytes).unwrap_or_else(|_| "(non-text value)".into()))
+        .map_err(|_| "Invalid Base64 value.")?;
+    Ok(String::from_utf8(bytes).ok())
 }
 
 fn eye(ui: &mut egui::Ui, enabled: bool, shown: bool, label: &str) -> bool {
@@ -234,6 +358,64 @@ mod tests {
         assert_eq!(decode_secret("Zml4dHVyZQ==\n").unwrap(), "fixture");
         assert_eq!(decode_secret("\n").unwrap(), "");
         assert!(decode_secret("").is_err());
+    }
+
+    #[test]
+    fn secret_data_switches_only_the_clicked_key_between_base64_and_text() {
+        let mut data = SecretData {
+            encoded: BTreeMap::from([
+                ("first".into(), "Zml4dHVyZQ==".into()),
+                ("second".into(), "b3RoZXI=".into()),
+            ]),
+            decoded: HashMap::new(),
+        };
+        let ctx = egui::Context::default();
+        let mut frame = |events| {
+            ctx.run(
+                egui::RawInput {
+                    events,
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| data.show(ui));
+                },
+            )
+        };
+        let has_label = |output: &egui::FullOutput, label: &str| {
+            output.shapes.iter().any(|shape| {
+                matches!(&shape.shape,
+                egui::Shape::Text(text) if text.galley.text() == label)
+            })
+        };
+        let initial = frame(vec![]);
+        assert!(has_label(&initial, "Zml4dHVyZQ=="));
+        assert!(has_label(&initial, "b3RoZXI="));
+        assert!(!has_label(&initial, "fixture"));
+        let pos = initial
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Circle(circle) if (circle.radius - 1.8).abs() < 0.01 => {
+                    Some(circle.center)
+                }
+                _ => None,
+            })
+            .expect("first key's eye button");
+        let pointer = |pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(vec![egui::Event::PointerMoved(pos), pointer(true)]);
+        let revealed = frame(vec![pointer(false)]);
+        assert!(has_label(&revealed, "fixture"));
+        assert!(has_label(&revealed, "b3RoZXI="));
+        assert!(!has_label(&revealed, "other"));
+        frame(vec![pointer(true)]);
+        let hidden = frame(vec![pointer(false)]);
+        assert!(has_label(&hidden, "Zml4dHVyZQ=="));
+        assert!(!has_label(&hidden, "fixture"));
     }
 
     #[cfg(unix)]

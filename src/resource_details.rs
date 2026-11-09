@@ -345,6 +345,9 @@ pub(super) fn show<'a>(
         false,
     );
     open = owner_links(ui, snapshot, resource).or(open);
+    if resource.kind == "Secret" {
+        fields(ui, raw, &[("Type", "/type"), ("Immutable", "/immutable")]);
+    }
     if resource.kind == "Service" {
         pills(ui, "Selector", map_pairs(&raw["spec"]["selector"]), true);
         row(ui, "Type", service_type(raw));
@@ -1237,7 +1240,6 @@ fn other_sections(ui: &mut egui::Ui, resource: &Resource) {
                 ("Finalizers", "/spec/finalizers"),
             ],
         ),
-        "Secret" => ("Data", &[("Type", "/type"), ("Immutable", "/immutable")]),
         "ConfigMap" => ("Data", &[("Immutable", "/immutable")]),
         "HorizontalPodAutoscaler" => (
             "Scaling",
@@ -1352,9 +1354,6 @@ fn other_sections(ui: &mut egui::Ui, resource: &Resource) {
             };
             pills(ui, "Keys", keys(&raw["data"]), false);
             pills(ui, "Binary Keys", keys(&raw["binaryData"]), false);
-        }
-        "Secret" => {
-            ui.colored_label(MUTED, "Secret values are available from Configuration.");
         }
         "ServiceAccount" => {
             section(ui, "References");

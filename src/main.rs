@@ -1205,6 +1205,10 @@ impl Observatory {
             }
         });
         resource_details::events(ui, &self.snapshot, resource);
+        if resource.kind == "Secret" {
+            resource_details::section(ui, "Data");
+            self.env_secrets.show_data(ui, self.target.as_ref(), resource);
+        }
     }
 
     fn open_pod_logs(&mut self, pod: &Resource, container: String) {
