@@ -31,7 +31,7 @@ Keep the core workflows familiar to Lens users while aiming for low CPU and RAM 
 
 ## Brand Commitments
 
-Use **Cluster Observatory** as the product name. Lens is the reference for core Kubernetes workflows and terminology. The app has its own icon in `assets/app-icon.png`.
+Use **Cluster Observatory** as the product name. Lens is the primary reference for core Kubernetes workflows, terminology, resource tables, and the inspector. The app has its own icon in `assets/app-icon.png`.
 
 ## Evidence on Hand
 

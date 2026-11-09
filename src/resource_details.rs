@@ -1,6 +1,6 @@
 use super::{
     array, egui, event_for, service_ports, service_type, status_color, text, Align, Resource,
-    ResourceColumn, RichText, Snapshot, Vec2, MUTED, SIDE, TEXT,
+    ResourceColumn, RichText, Snapshot, Vec2, muted, side, text_color,
 };
 use crate::env_secrets::EnvSecrets;
 use serde_json::Value;
@@ -15,7 +15,7 @@ pub(super) fn section(ui: &mut egui::Ui, name: &str) {
     ui.add_space(11.0);
     ui.separator();
     ui.add_space(7.0);
-    ui.label(RichText::new(name).size(17.0).strong().color(TEXT));
+    ui.label(RichText::new(name).size(17.0).strong().color(text_color()));
     ui.add_space(4.0);
 }
 
@@ -44,7 +44,7 @@ fn property(ui: &mut egui::Ui, label: &str, value: impl FnOnce(&mut egui::Ui)) {
     let mut value = Some(value);
     columns(ui, &[0.29, 0.71], |ui, index| {
         if index == 0 {
-            ui.add(egui::Label::new(RichText::new(label).color(MUTED)).wrap());
+            ui.add(egui::Label::new(RichText::new(label).color(muted())).wrap());
         } else if let Some(value) = value.take() {
             value(ui);
         }
@@ -112,7 +112,7 @@ fn pills(ui: &mut egui::Ui, title: &str, entries: Vec<String>, expanded: bool) {
                     entry.clone()
                 };
                 let response = ui.add(
-                    egui::Label::new(RichText::new(caption).background_color(SIDE)).truncate(),
+                    egui::Label::new(RichText::new(caption).background_color(side())).truncate(),
                 );
                 response.on_hover_text_at_pointer(entry);
             }
@@ -128,15 +128,19 @@ fn pills(ui: &mut egui::Ui, title: &str, entries: Vec<String>, expanded: bool) {
 }
 
 fn table(ui: &mut egui::Ui, headings: &[&str], widths: &[f32], rows: &[Vec<String>], empty: &str) {
+    detail_table(ui, headings, widths, rows, empty, None);
+}
+
+fn detail_table(ui: &mut egui::Ui, headings: &[&str], widths: &[f32], rows: &[Vec<String>], empty: &str, link_column: Option<usize>) {
     if rows.is_empty() {
         ui.add_space(5.0);
-        ui.colored_label(MUTED, empty);
+        ui.colored_label(muted(), empty);
         return;
     }
     divider(ui);
     ui.add_space(4.0);
     columns(ui, widths, |ui, index| {
-        ui.add(egui::Label::new(RichText::new(headings[index]).color(TEXT).strong()).wrap());
+        ui.add(egui::Label::new(RichText::new(headings[index]).color(text_color()).strong()).wrap());
     });
     divider(ui);
     for row in rows {
@@ -147,7 +151,11 @@ fn table(ui: &mut egui::Ui, headings: &[&str], widths: &[f32], rows: &[Vec<Strin
                 .filter(|value| !value.is_empty())
                 .map(String::as_str)
                 .unwrap_or("—");
-            ui.add(egui::Label::new(RichText::new(value).color(MUTED)).wrap());
+            if link_column == Some(index) && value != "—" {
+                ui.add(egui::Hyperlink::from_label_and_url(RichText::new(value).color(crate::blue()).underline(), value));
+            } else {
+                ui.add(egui::Label::new(RichText::new(value).color(muted())).wrap());
+            }
         });
         ui.add_space(3.0);
         divider(ui);
@@ -847,7 +855,7 @@ fn container_environment<'a>(
                     }
                 }
                 for message in unavailable {
-                    ui.colored_label(super::ORANGE, message);
+                    ui.colored_label(super::orange(), message);
                 }
                 for (variable, (kind, selector, key)) in imported {
                     open = ui
@@ -927,7 +935,7 @@ fn environment_reference<'a>(
         if let Some(value) = value {
             environment_line(ui, variable, value);
         } else {
-            ui.add(egui::Label::new(RichText::new(format!("{variable} :")).color(MUTED)).wrap());
+            ui.add(egui::Label::new(RichText::new(format!("{variable} :")).color(muted())).wrap());
         }
         let hint = key.map_or_else(
             || format!("{kind} {name}"),
@@ -955,7 +963,7 @@ fn environment_reference<'a>(
 fn environment_line(ui: &mut egui::Ui, name: &str, value: &str) {
     let value = if value.is_empty() { "(empty)" } else { value };
     ui.add(
-        egui::Label::new(RichText::new(format!("{name} : {value}")).color(MUTED))
+        egui::Label::new(RichText::new(format!("{name} : {value}")).color(muted()))
             .wrap()
             .selectable(true),
     );
@@ -1063,7 +1071,7 @@ fn service(ui: &mut egui::Ui, snapshot: &Snapshot, resource: &Resource) -> Optio
         },
     );
     if let Some(error) = snapshot.detail_errors.get("EndpointSlice") {
-        ui.label(RichText::new("Endpoint Slice access details").color(MUTED))
+        ui.label(RichText::new("Endpoint Slice access details").color(muted()))
             .on_hover_text(error);
     }
 
@@ -1090,7 +1098,7 @@ fn service(ui: &mut egui::Ui, snapshot: &Snapshot, resource: &Resource) -> Optio
         },
     );
     if let Some(error) = snapshot.detail_errors.get("Endpoints") {
-        ui.label(RichText::new("Endpoints access details").color(MUTED))
+        ui.label(RichText::new("Endpoints access details").color(muted()))
             .on_hover_text(error);
     }
     forward
@@ -1151,6 +1159,17 @@ fn backend(value: &Value) -> String {
     String::new()
 }
 
+fn ingress_url(host: &str, path: &str, https: bool) -> Option<String> {
+    if host.is_empty() || !host.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-')) {
+        return None;
+    }
+    if !path.is_empty() && (!path.starts_with('/') || path.chars().any(|c| c.is_control() || c.is_whitespace())) {
+        return None;
+    }
+    let scheme = if https { "https" } else { "http" };
+    Some(format!("{scheme}://{host}{}", if path.is_empty() { "/" } else { path }))
+}
+
 fn ingress(ui: &mut egui::Ui, raw: &Value) {
     section(ui, "Rules");
     if let Some(default) = raw.pointer("/spec/defaultBackend") {
@@ -1158,7 +1177,7 @@ fn ingress(ui: &mut egui::Ui, raw: &Value) {
     }
     let rules = array(raw, "/spec/rules");
     if rules.is_empty() {
-        ui.colored_label(MUTED, "No host rules found");
+        ui.colored_label(muted(), "No host rules found");
     }
     for rule in rules {
         let host = rule["host"]
@@ -1167,23 +1186,16 @@ fn ingress(ui: &mut egui::Ui, raw: &Value) {
             .unwrap_or("*");
         ui.add_space(5.0);
         ui.strong(format!("Host: {host}"));
-        let paths: Vec<_> = array(&rule, "/http/paths")
-            .iter()
-            .map(|path| {
-                vec![
-                    text(path, "/path"),
-                    text(path, "/pathType"),
-                    backend(&path["backend"]),
-                ]
-            })
-            .collect();
-        table(
-            ui,
-            &["Path", "Path Type", "Backend"],
-            &[0.28, 0.24, 0.48],
-            &paths,
-            "No paths found",
-        );
+        let https = array(raw, "/spec/tls").iter().any(|tls| {
+            array(tls, "/hosts").iter().filter_map(Value::as_str).any(|name| name == host)
+        });
+        let paths: Vec<_> = array(&rule, "/http/paths").iter().map(|route| {
+            let path = text(route, "/path");
+            let link = ingress_url(host, &path, https).unwrap_or_default();
+            vec![path, text(route, "/pathType"), link, backend(&route["backend"])]
+        }).collect();
+        detail_table(ui, &["Path", "Path Type", "Link", "Backend"], &[0.15, 0.19, 0.42, 0.24],
+            &paths, "No paths found", Some(2));
     }
     let tls = array(raw, "/spec/tls");
     if !tls.is_empty() {
@@ -1203,12 +1215,12 @@ fn ingress(ui: &mut egui::Ui, raw: &Value) {
     section(ui, "Load-Balancer Ingress Points");
     let rows: Vec<_> = array(raw, "/status/loadBalancer/ingress")
         .iter()
-        .map(|entry| vec![text(entry, "/ip"), text(entry, "/hostname")])
+        .map(|entry| vec![text(entry, "/hostname"), text(entry, "/ip")])
         .collect();
     table(
         ui,
-        &["IP", "Hostname"],
-        &[0.34, 0.66],
+        &["Hostname", "IP"],
+        &[0.66, 0.34],
         &rows,
         "No ingress points found",
     );

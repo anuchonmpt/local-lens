@@ -70,32 +70,53 @@ impl KubeconfigSettings {
         changed
     }
 
+    #[cfg(target_os = "macos")]
+    pub fn pick_file(&mut self) -> bool {
+        let Some(file) = rfd::FileDialog::new()
+            .set_title("Add Kubeconfig")
+            .pick_file()
+        else {
+            return false;
+        };
+        self.add(file);
+        true
+    }
+
     pub fn show(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Kubernetes");
-        ui.separator();
-        ui.strong("Manage Kubeconfigs");
-        ui.label("Add a kubeconfig or sync a folder to keep Local Kubeconfigs up to date.");
-
-        #[cfg(target_os = "macos")]
-        ui.horizontal(|ui| {
-            if ui.button("Add Kubeconfig…").clicked() {
-                if let Some(file) = rfd::FileDialog::new()
-                    .set_title("Add Kubeconfig")
-                    .pick_file()
-                {
-                    self.add(file);
-                }
+        crate::settings_panel().show(ui, |ui| {
+            ui.set_min_height(186.0);
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Local kubeconfigs").font(crate::theme::semibold(18.0)));
+                #[cfg(target_os = "macos")]
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if crate::settings_button(ui, "Sync folder…", None, 130.0, true, false).clicked() {
+                        if let Some(folder) = rfd::FileDialog::new().set_title("Sync Kubeconfig Folder").pick_folder() {
+                            self.add(folder);
+                        }
+                    }
+                    ui.add_space(4.0);
+                    if crate::settings_button(ui, "Add kubeconfig…", None, 144.0, true, true).clicked() {
+                        self.pick_file();
+                    }
+                });
+            });
+            ui.add_space(6.0);
+            crate::settings_divider(ui);
+            ui.add_space(14.0);
+            if self.sources.is_empty() {
+                ui.label(egui::RichText::new("No kubeconfigs added").font(crate::theme::semibold(15.0)));
+                ui.colored_label(crate::muted(), egui::RichText::new("Add a file, paste kubeconfig YAML, or sync a folder to discover its contexts.").size(14.0));
+            } else {
+                self.show_sources(ui);
             }
-            if ui.button("Sync Folder…").clicked() {
-                if let Some(folder) = rfd::FileDialog::new()
-                    .set_title("Sync Kubeconfig Folder")
-                    .pick_folder()
-                {
-                    self.add(folder);
-                }
-            }
+            if !self.message.is_empty() { ui.label(&self.message); }
         });
+        ui.collapsing("Paste kubeconfig or sync by path", |ui| {
+            self.show_import(ui)
+        });
+    }
 
+    fn show_import(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.add(
                 egui::TextEdit::singleline(&mut self.path)
@@ -130,14 +151,9 @@ impl KubeconfigSettings {
                 }
             }
         });
+    }
 
-        ui.separator();
-        ui.strong("Synced Items");
-        ui.horizontal(|ui| {
-            ui.label("Folder");
-            ui.monospace("~/.kube");
-            ui.label("Default");
-        });
+    fn show_sources(&mut self, ui: &mut egui::Ui) {
         let mut remove = None;
         egui::ScrollArea::vertical()
             .max_height(260.0)
@@ -170,9 +186,6 @@ impl KubeconfigSettings {
             });
         if let Some(index) = remove {
             self.message = self.remove_source(index).unwrap_or_else(|error| error);
-        }
-        if !self.message.is_empty() {
-            ui.label(&self.message);
         }
     }
 

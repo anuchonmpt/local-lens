@@ -126,16 +126,16 @@ impl Updates {
     pub fn footer(&mut self, ui: &mut egui::Ui) -> bool {
         let available = matches!(self.state, State::Available(_));
         let (color, hint) = if available {
-            (crate::GREEN, "Update available · Version menu")
+            (crate::green(), "Update available · Version menu")
         } else if matches!(self.state, State::Checking) {
-            (crate::MUTED, "Checking for updates…")
+            (crate::muted(), "Checking for updates…")
         } else {
-            (crate::MUTED, "Version menu")
+            (crate::muted(), "Version menu")
         };
         let label = concat!("v", env!("CARGO_PKG_VERSION"));
         let version =
             ui.painter()
-                .layout_no_wrap(label.into(), egui::FontId::proportional(11.0), color);
+                .layout_no_wrap(label.into(), egui::FontId::proportional(12.0), color);
         let padding = if available {
             egui::vec2(7.0, 3.0)
         } else {
@@ -149,9 +149,9 @@ impl Updates {
         });
         if available {
             let fill = if response.hovered() {
-                egui::Color32::from_rgb(39, 75, 52)
+                crate::theme::tone(egui::Color32::from_rgb(208, 232, 218), egui::Color32::from_rgb(39, 75, 52))
             } else {
-                egui::Color32::from_rgb(29, 57, 40)
+                crate::theme::success_fill()
             };
             ui.painter().rect_filled(rect, 5.0, fill);
             ui.painter().arrow(
@@ -174,8 +174,8 @@ impl Updates {
         let style = popup_ui.style_mut();
         style.spacing.menu_margin = egui::Margin::same(6);
         style.visuals.menu_corner_radius = 9.into();
-        style.visuals.window_fill = crate::PANEL;
-        style.visuals.window_stroke = egui::Stroke::new(1.0_f32, crate::BORDER);
+        style.visuals.window_fill = crate::panel();
+        style.visuals.window_stroke = egui::Stroke::new(1.0_f32, crate::border());
         egui::popup::popup_above_or_below_widget(
             &popup_ui,
             menu,
@@ -191,7 +191,7 @@ impl Updates {
                         egui::RichText::new("CLUSTER OBSERVATORY")
                             .size(10.0)
                             .strong()
-                            .color(crate::MUTED),
+                            .color(crate::muted()),
                     );
                 });
                 ui.add_space(3.0);
@@ -297,11 +297,11 @@ impl Updates {
                             egui::Align2::RIGHT_CENTER,
                             format!("{:.0}%", fraction * 100.0),
                             egui::TextStyle::Body.resolve(ui.style()),
-                            crate::MUTED,
+                            crate::muted(),
                         );
                     }
                     let fill = if fraction > 0.0 {
-                        crate::TEXT
+                        crate::text_color()
                     } else {
                         egui::Color32::TRANSPARENT
                     };
@@ -406,13 +406,13 @@ fn version_menu_row(
             .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label));
         let painter = ui.painter();
         if enabled && (response.hovered() || response.has_focus()) {
-            painter.rect_filled(rect, 5.0, crate::SIDE);
+            painter.rect_filled(rect, 5.0, crate::side());
         }
-        let text = if enabled { crate::TEXT } else { crate::MUTED };
+        let text = if enabled { crate::text_color() } else { crate::muted() };
         let icon_color = if highlighted {
-            crate::GREEN
+            crate::green()
         } else {
-            crate::MUTED
+            crate::muted()
         };
         crate::nav_icon(
             painter,
@@ -784,7 +784,8 @@ mod tests {
             frame(updates, vec![egui::Event::PointerMoved(pos), button(true)]);
             frame(updates, vec![button(false)]);
         };
-        let version_label = concat!("v", env!("CARGO_PKG_VERSION"));
+        let version_label = format!("v{VERSION}");
+        let version_label = version_label.as_str();
         let begin_check = |updates: &mut Updates| {
             let (sender, receiver) = mpsc::channel();
             updates.state = State::Checking;
@@ -813,7 +814,7 @@ mod tests {
         assert!(!updates.show_result);
         assert!(frame(&mut updates, vec![]).shapes.iter().any(|shape| {
             matches!(shape.shape, egui::Shape::LineSegment { points: [from, to], stroke }
-                if stroke.color == crate::GREEN && from.x == to.x && from.y > to.y)
+                if stroke.color == crate::green() && from.x == to.x && from.y > to.y)
         }));
 
         begin_check(&mut updates).send(release(1)).unwrap();

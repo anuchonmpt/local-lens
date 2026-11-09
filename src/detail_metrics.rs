@@ -1,6 +1,6 @@
 use super::{
-    egui, now, resource_details, visualize, words, Align2, Color32, FontId, Pos2, Rect, Resource,
-    RichText, Sample, Sense, Snapshot, Stroke, Target, Vec2, BLUE, BORDER, MUTED, PURPLE, SIDE,
+    blue, border, egui, muted, now, purple, resource_details, side, visualize, words, Align2,
+    Color32, FontId, Pos2, Rect, Resource, RichText, Sample, Sense, Snapshot, Stroke, Target, Vec2,
 };
 use serde_json::Value;
 use std::{
@@ -144,6 +144,87 @@ impl Metrics {
         target: Option<&Target>,
     ) {
         resource_details::section(ui, "Metrics");
+        if resource.kind == "Pod" {
+            let history = uid(resource).and_then(|id| self.history.get(id));
+            ui.columns(2, |columns| {
+                for (column, (name, value, color, memory)) in columns.iter_mut().zip([
+                    ("CPU", resource.cpu, blue(), false),
+                    ("Memory", resource.memory, purple(), true),
+                ]) {
+                    egui::Frame::new()
+                        .fill(side())
+                        .stroke(Stroke::new(1.0_f32, border()))
+                        .corner_radius(5)
+                        .inner_margin(8)
+                        .show(column, |ui| {
+                            ui.set_min_height(77.0);
+                            ui.colored_label(muted(), RichText::new(name).size(11.0));
+                            let value = value.map_or_else(
+                                || "—".into(),
+                                |value| {
+                                    if memory {
+                                        format!("{:.0} MiB", value * 1024.0)
+                                    } else {
+                                        format!("{:.0}m", value * 1000.0)
+                                    }
+                                },
+                            );
+                            ui.label(RichText::new(value).font(crate::theme::semibold(16.0)));
+                            let points: Vec<_> = history
+                                .into_iter()
+                                .flatten()
+                                .rev()
+                                .take(15)
+                                .filter_map(
+                                    |sample| if memory { sample.memory } else { sample.cpu },
+                                )
+                                .collect();
+                            let points = if target.is_none() && points.is_empty() {
+                                if memory { vec![0.81, 0.69, 0.86, 0.65, 0.78, 0.84, 0.71, 0.75] }
+                                else { vec![0.59, 0.81, 0.57, 0.96, 0.52, 0.81, 0.58, 0.86] }
+                            } else { points };
+                            if points.len() > 1 {
+                                let (rect, _) = ui.allocate_exact_size(
+                                    Vec2::new(ui.available_width(), 24.0),
+                                    Sense::hover(),
+                                );
+                                let max = points.iter().copied().fold(0.001, f64::max);
+                                let last = (points.len() - 1) as f32;
+                                let path = points
+                                    .into_iter()
+                                    .rev()
+                                    .enumerate()
+                                    .map(|(i, value)| {
+                                        egui::pos2(
+                                            egui::lerp(rect.x_range(), i as f32 / last),
+                                            egui::lerp(
+                                                rect.y_range(),
+                                                1.0 - (value / max) as f32 * 0.85,
+                                            ),
+                                        )
+                                    })
+                                    .collect();
+                                ui.painter()
+                                    .add(egui::Shape::line(path, Stroke::new(1.2_f32, color)));
+                            }
+                        });
+                }
+            });
+            if target.is_none() { ui.colored_label(muted(), RichText::new("Sample history · last 15 min").size(12.0)); }
+            egui::CollapsingHeader::new("Metric history")
+                .show(ui, |ui| self.show_history(ui, snapshot, resource, target));
+            return;
+        }
+        self.show_history(ui, snapshot, resource, target);
+    }
+
+    fn show_history(
+        &mut self,
+        ui: &mut egui::Ui,
+        snapshot: &Snapshot,
+        resource: &Resource,
+        target: Option<&Target>,
+    ) {
         let mut range_index = self.range_index.unwrap_or(1);
         ui.horizontal_wrapped(|ui| {
             egui::ComboBox::from_id_salt("detail-metrics-range")
@@ -212,13 +293,13 @@ impl Metrics {
         } else {
             (local, "Waiting for metrics samples", super::REFRESH)
         };
-        ui.label(RichText::new(caption).small().color(MUTED));
+        ui.label(RichText::new(caption).small().color(muted()));
         if source.is_some() && caption != "Prometheus" {
             if let Some(Err(error)) = &self.remote.result {
                 ui.label(
                     RichText::new("Prometheus history unavailable")
                         .small()
-                        .color(MUTED),
+                        .color(muted()),
                 )
                 .on_hover_text(error);
             }
@@ -463,7 +544,7 @@ pub(super) fn chart(
 ) {
     let unit = if memory { "MiB" } else { "cores" };
     let title = if memory { "Memory Usage" } else { "CPU Usage" };
-    let color = if memory { PURPLE } else { BLUE };
+    let color = if memory { purple() } else { blue() };
     let format_value = |value: f64| {
         if memory {
             format!("{:.1} {unit}", value * 1024.0)
@@ -487,7 +568,7 @@ pub(super) fn chart(
         return;
     }
     let painter = ui.painter();
-    painter.rect_filled(plot, 3.0, SIDE);
+    painter.rect_filled(plot, 3.0, side());
     let peak = points
         .iter()
         .map(|(_, value)| *value)
@@ -498,13 +579,13 @@ pub(super) fn chart(
     let scale = 4.0 * tick;
     for line in 0..=4 {
         let y = plot.bottom() - plot.height() * line as f32 / 4.0;
-        painter.hline(plot.x_range(), y, Stroke::new(1.0_f32, BORDER));
+        painter.hline(plot.x_range(), y, Stroke::new(1.0_f32, border()));
         painter.text(
             Pos2::new(plot.right() + 5.0, y),
             Align2::LEFT_CENTER,
             format_value(tick * f64::from(line)),
             FontId::proportional(10.0),
-            MUTED,
+            muted(),
         );
     }
     let range = end.saturating_sub(start).max(1);
@@ -528,7 +609,7 @@ pub(super) fn chart(
             align,
             label,
             FontId::proportional(10.0),
-            MUTED,
+            muted(),
         );
     }
     if points.is_empty() {
@@ -537,7 +618,7 @@ pub(super) fn chart(
             Align2::CENTER_CENTER,
             "No samples in this range",
             FontId::proportional(12.0),
-            MUTED,
+            muted(),
         );
         return;
     }
@@ -566,7 +647,7 @@ pub(super) fn chart(
             .min_by_key(|(stamp, _)| stamp.abs_diff(hovered))
         {
             if stamp.abs_diff(hovered) <= step {
-                painter.vline(x(stamp), plot.y_range(), Stroke::new(1.0_f32, MUTED));
+                painter.vline(x(stamp), plot.y_range(), Stroke::new(1.0_f32, muted()));
                 response.on_hover_text(format!(
                     "{} · {}m ago",
                     format_value(value),

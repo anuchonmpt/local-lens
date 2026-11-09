@@ -47,7 +47,8 @@ also explicitly choose **All namespaces**. Open **Settings → Kubernetes** to
 add a kubeconfig file, paste kubeconfig YAML, or sync a folder. The app remembers
 these sources and refreshes the sidebar as files are added, edited, or removed.
 Folder sync reads files directly in the selected folder. Open **Settings → Connections**
-for manual connections and the sample workspace. When running a build outside
+for manual connections and the sample workspace. **Settings → Appearance**
+lets you save Light, Dark, or System (follow the operating system). When running a build outside
 the macOS app bundle, install kubectl separately.
 
 You can also connect on launch:
@@ -68,6 +69,11 @@ You can also connect on launch:
   **Apply YAML** in the header accepts new or updated manifests.
 - For a Pod, select a container to read recent or previous logs, follow
   live output, filter lines, and copy the retained output. On macOS,
+  Open **Logs** from the row’s **⋮** menu or the Pod Inspector. The dock
+  supports literal and regex search, case sensitivity, match navigation,
+  timestamps, resource names, line wrapping, time ranges, and saving retained
+  output on macOS. **Session** contains Recent, Follow, Previous, Stop, and
+  Copy. The context row links back to the Namespace and Pod.
   **Open Shell in Terminal** opens a container shell in Terminal.app.
   macOS may prompt for permission to control Terminal.
 - Open **Port Forward** on a Pod or Service to bind a port on `127.0.0.1`.
@@ -91,10 +97,18 @@ You can also connect on launch:
 ```sh
 cargo test --locked
 ./target/debug/cluster-observatory --screenshot shots/now.png
+./target/debug/cluster-observatory --screenshot shots/logs.png --screenshot-view logs --screenshot-theme dark
 ```
 
 Screenshot capture requires a graphical desktop session. An explicit
-`--context` and optional `--kubeconfig` can capture a live workspace as well.
+`--context` and optional `--kubeconfig` can capture a live workspace as well. With sample data, screenshot views
+include `pods`, `logs`, `logs-expanded`, `appearance`, `deployments`, `ingress`,
+and `secrets`. Screenshot theme overrides do not change saved preferences. Resource pages use
+lowercase names with hyphens, such as `network-policies`. Use `--sample` to
+open the interactive sample workspace directly.
+
+The automated suite also exercises the Pod row menu, the Deployment Inspector,
+theme persistence, and log sessions against a local kubectl fixture.
 
 Tested against an isolated Kind cluster with an nginx Deployment and Service.
 The smoke test covered resource loading, logs, container exec, HTTP through

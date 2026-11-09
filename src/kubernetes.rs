@@ -71,8 +71,8 @@ impl Target {
         // AppleScript receives each argument independently and quotes it for the shell.
         let script = r#"
             on run argv
-                set cmd to ""
-                repeat with arg in argv
+                set cmd to "/usr/bin/env " & quoted form of item 1 of argv
+                repeat with arg in rest of argv
                     set cmd to cmd & " " & quoted form of (contents of arg)
                 end repeat
                 tell application "Terminal"
@@ -83,6 +83,15 @@ impl Target {
         "#;
         let output = Command::new("osascript")
             .args(["-e", script, "--"])
+            .arg({
+                let mut path = std::ffi::OsString::from("PATH=");
+                if let Some(value) = command.get_envs().find_map(|(key, value)| (key == "PATH").then_some(value).flatten()) {
+                    path.push(value);
+                } else {
+                    path.push("/usr/bin:/bin:/usr/sbin:/sbin");
+                }
+                path
+            })
             .arg(command.get_program())
             .args(command.get_args())
             .output()

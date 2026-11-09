@@ -1,6 +1,6 @@
 use super::{
-    egui, Color32, Resource, RichText, Sense, Snapshot, Vec2, ALL_NAMESPACES, BLUE, BORDER, GREEN,
-    MUTED, ORANGE,
+    egui, Color32, Resource, RichText, Sense, Snapshot, Vec2, ALL_NAMESPACES, blue, border, green,
+    muted, orange,
 };
 use std::collections::HashMap;
 
@@ -39,12 +39,12 @@ impl Status {
 
     fn display(self) -> (&'static str, Color32) {
         match self {
-            Self::Unknown => ("Unknown / no pods", BORDER),
-            Self::Terminating => ("Terminating", MUTED),
-            Self::Succeeded => ("Succeeded", BLUE),
-            Self::Running => ("Running / scheduled", GREEN),
-            Self::Suspended => ("Suspended", ORANGE),
-            Self::Pending => ("Pending", ORANGE),
+            Self::Unknown => ("Unknown / no pods", border()),
+            Self::Terminating => ("Terminating", muted()),
+            Self::Succeeded => ("Succeeded", blue()),
+            Self::Running => ("Running / scheduled", green()),
+            Self::Suspended => ("Suspended", orange()),
+            Self::Pending => ("Pending", orange()),
             Self::Failed => ("Failed", Color32::from_rgb(221, 86, 90)),
         }
     }
@@ -134,7 +134,7 @@ pub(super) fn show(
             }
             let total: usize = counts.iter().sum();
             ui.horizontal(|ui| {
-                let link = egui::Link::new(RichText::new(format!("{label} ({total})")).color(BLUE));
+                let link = egui::Link::new(RichText::new(format!("{label} ({total})")).color(blue()));
                 if ui.add_sized([118.0, 20.0], link).clicked() {
                     page = Some(label);
                 }
@@ -142,7 +142,7 @@ pub(super) fn show(
                     Vec2::new(ui.available_width().max(0.0), 5.0),
                     Sense::hover(),
                 );
-                ui.painter().rect_filled(bar, 0.0, BORDER);
+                ui.painter().rect_filled(bar, 0.0, border());
                 let mut left = bar.left();
                 let mut legend = Vec::new();
                 for (status, count) in Status::ALL

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.22 · 2026-11-09
+
+- Redesigned the cluster workspace with Light, Dark, and System appearance settings.
+- Expanded resource tables and inspectors, with per-row actions and improved Pod, Secret, and Ingress details.
+- Added a Pod logs dock with live streaming, container selection, search, and export.
+- Moved cluster selection to the sidebar and kept app CPU, RAM, and version visible in the footer.
+- Improved the sample workspace and fixed spacing next to the Actions column.
+
 ## 0.1.21 · 2026-11-09
 
 - Show the update status and download percentage above a thin progress bar.

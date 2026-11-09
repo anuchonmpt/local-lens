@@ -1,4 +1,4 @@
-use super::{words, Resource, Target, BLUE, GREEN, MUTED, ORANGE, PURPLE, TEXT};
+use super::{blue, green, muted, orange, purple, text_color, words, Resource, Target};
 use eframe::egui::{
     self,
     epaint::{CubicBezierShape, Mesh},
@@ -6,17 +6,19 @@ use eframe::egui::{
     Align2, Color32, FontId, Pos2, Rect, RichText, Sense, Stroke, Vec2,
 };
 
-const CANVAS: Color32 = Color32::from_rgb(14, 20, 31);
-const BORDER: Color32 = Color32::from_rgb(46, 60, 79);
+use crate::theme::{border, panel, selection, side};
+
 const TILE: Vec2 = Vec2::new(196.0, 54.0);
 const WORKLOAD: Color32 = Color32::from_rgb(142, 151, 255);
-const TOPOLOGY_GROUPS: [(&str, Color32); 5] = [
-    ("Ingress", ORANGE),
-    ("Service", BLUE),
-    ("Workload", WORKLOAD),
-    ("Pod", PURPLE),
-    ("Node", GREEN),
-];
+fn topology_groups() -> [(&'static str, Color32); 5] {
+    [
+        ("Ingress", orange()),
+        ("Service", blue()),
+        ("Workload", WORKLOAD),
+        ("Pod", purple()),
+        ("Node", green()),
+    ]
+}
 use serde_json::Value;
 use std::{
     collections::{BTreeSet, HashMap},
@@ -24,9 +26,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[derive(Default, PartialEq)]
+#[derive(Clone, Copy, Default, PartialEq)]
 enum Mode {
     #[default]
+    Map,
     Topology,
     Traffic,
 }
@@ -35,22 +38,29 @@ pub struct Visualize {
     mode: Mode,
     camera: Camera,
     traffic: Traffic,
+    resource_query: String,
 }
 
 impl Default for Visualize {
     fn default() -> Self {
         Self {
-            mode: Mode::Topology,
+            mode: Mode::Map,
             camera: Camera::default(),
             traffic: Traffic::default(),
+            resource_query: String::new(),
         }
     }
 }
 
 impl Visualize {
+    pub fn show_traffic(&mut self) {
+        self.mode = Mode::Traffic;
+    }
+
     pub fn reset_scope(&mut self) {
         self.camera = Camera::default();
         self.traffic = Traffic::default();
+        self.resource_query.clear();
     }
 
     pub fn show(
@@ -61,19 +71,34 @@ impl Visualize {
         target: Option<&Target>,
         namespace: Option<&str>,
     ) -> Option<Resource> {
-        let previous = self.mode == Mode::Traffic;
+        let previous = self.mode;
         egui::Frame::new()
-            .fill(CANVAS)
-            .stroke(Stroke::new(1.0_f32, BORDER))
+            .fill(panel())
+            .stroke(Stroke::new(1.0_f32, border()))
             .corner_radius(10)
             .inner_margin(10)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.selectable_value(&mut self.mode, Mode::Topology, "3D Topology");
-                    ui.selectable_value(&mut self.mode, Mode::Traffic, "Live Traffic Mesh");
+                    ui.selectable_value(&mut self.mode, Mode::Map, "Resource map");
+                    ui.selectable_value(&mut self.mode, Mode::Traffic, "Live traffic");
+                    ui.selectable_value(&mut self.mode, Mode::Topology, "3D topology");
+                    if self.mode == Mode::Map {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.resource_query)
+                                .desired_width(170.0)
+                                .hint_text("Search resources…"),
+                        );
+                    }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.button("Fit view").clicked() {
-                            self.camera = Camera::default();
+                            self.camera.pan = Vec2::ZERO;
+                            self.camera.zoom = 1.0;
+                            if self.mode == Mode::Map {
+                                self.resource_query.clear();
+                            }
+                        }
+                        if self.mode == Mode::Map {
+                            return;
                         }
                         if ui.button("+").on_hover_text("Zoom in").clicked() {
                             self.camera.zoom_by(1.25);
@@ -86,13 +111,18 @@ impl Visualize {
                 });
             });
         ui.add_space(8.0);
-        if previous != (self.mode == Mode::Traffic) {
+        if previous != self.mode {
             self.camera = Camera::default();
+            self.resource_query.clear();
+        }
+        if self.mode == Mode::Map {
+            let graph = Graph::topology(resources);
+            return Self::resource_map(ui, &graph, namespace, &self.resource_query);
         }
         if self.mode == Mode::Topology {
             let graph = Graph::topology(resources);
             ui.horizontal_wrapped(|ui| {
-                for (kind, color) in TOPOLOGY_GROUPS {
+                for (kind, color) in topology_groups() {
                     let count = graph
                         .nodes
                         .iter()
@@ -100,26 +130,43 @@ impl Visualize {
                         .count();
                     if count > 0 {
                         ui.colored_label(color, "●");
-                        ui.label(RichText::new(format!("{kind}  {count}")).color(TEXT));
+                        ui.label(RichText::new(format!("{kind}  {count}")).color(text_color()));
                         ui.add_space(8.0);
                     }
                 }
             });
-            return self
-                .camera
-                .draw(ui, &graph, "No topology resources in this namespace.");
+            return Self::draw_graph(
+                &mut self.camera,
+                &mut self.resource_query,
+                ui,
+                &graph,
+                "No topology resources in this namespace.",
+            );
         }
 
         let Some((target, source)) = target.zip(prometheus_service(all_resources)) else {
             self.traffic = Traffic::default();
-            ui.colored_label(ORANGE, "Traffic source unavailable");
-            ui.label("Live HTTP traffic requires a Prometheus service collecting Istio metrics.");
-            return self.camera.draw(ui, &Graph::default(), "No traffic source");
+            let available = ui.available_size();
+            egui::Frame::new().fill(side()).stroke(Stroke::new(1.0_f32, border())).corner_radius(6)
+                .show(ui, |ui| {
+                    ui.set_min_size(available - Vec2::splat(2.0));
+                    ui.add_space((available.y * 0.36).max(12.0));
+                    ui.horizontal(|ui| {
+                        let card_width = 420.0_f32.min(ui.available_width());
+                        ui.add_space(((ui.available_width() - card_width) * 0.5).max(0.0));
+                        egui::Frame::new().fill(panel()).stroke(Stroke::new(1.0_f32, border()))
+                            .corner_radius(7).inner_margin(18).show(ui, |ui| {
+                                ui.colored_label(orange(), RichText::new("Traffic source unavailable").size(18.0).strong());
+                                ui.label("Live HTTP traffic requires a Prometheus service collecting Istio metrics.");
+                            });
+                    });
+                });
+            return None;
         };
         self.traffic.poll(target, source, namespace);
         ui.horizontal_wrapped(|ui| {
             ui.colored_label(
-                MUTED,
+                muted(),
                 format!(
                     "Istio HTTP · {}/{} · Requests/s over 1 minute",
                     source.namespace, source.name
@@ -136,14 +183,278 @@ impl Visualize {
             ),
             Some(Err(error)) => {
                 ui.collapsing("Could not read traffic metrics", |ui| {
-                    ui.colored_label(ORANGE, error);
+                    ui.colored_label(orange(), error);
                 });
                 (&[][..], "Traffic query failed")
             }
             None => (&[][..], "Waiting for traffic metrics…"),
         };
         let graph = Graph::traffic(flows, resources);
-        self.camera.draw(ui, &graph, empty)
+        Self::draw_graph(
+            &mut self.camera,
+            &mut self.resource_query,
+            ui,
+            &graph,
+            empty,
+        )
+    }
+
+    fn resource_map(
+        ui: &mut egui::Ui,
+        graph: &Graph<'_>,
+        namespace: Option<&str>,
+        query: &str,
+    ) -> Option<Resource> {
+        let query = query.trim().to_lowercase();
+        let matches = |item: &Item<'_>| {
+            [item.name, item.scope]
+                .iter()
+                .any(|text| text.to_lowercase().contains(&query))
+        };
+        let edges: Vec<_> = graph
+            .links
+            .iter()
+            .filter(|edge| {
+                let from = &graph.nodes[edge.from];
+                let to = &graph.nodes[edge.to];
+                from.kind == "Service" && to.kind == "Pod" && (matches(from) || matches(to))
+            })
+            .collect();
+        let sources: BTreeSet<_> = edges.iter().map(|edge| edge.from).collect();
+        let targets: BTreeSet<_> = edges.iter().map(|edge| edge.to).collect();
+        egui::Frame::new()
+            .fill(side())
+            .stroke(Stroke::new(1.0_f32, border()))
+            .corner_radius(6)
+            .inner_margin(16)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.strong(namespace.unwrap_or("All namespaces"));
+                    ui.separator();
+                    ui.colored_label(muted(), "Selected relationships");
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.colored_label(muted(), "Service selectors");
+                    });
+                });
+                ui.separator();
+                if edges.is_empty() {
+                    ui.label(if query.is_empty() {
+                        "No matching Service selectors in this namespace."
+                    } else {
+                        "No relationships match your search."
+                    });
+                    return None;
+                }
+                let graph_height = (ui.available_height() - 40.0).max(120.0);
+                let selection = egui::ScrollArea::vertical()
+                    .max_height(graph_height)
+                    .id_salt("service-resource-map")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        let height =
+                            (sources.len().max(targets.len()) as f32 * 48.0 + 58.0).max(280.0);
+                        let (area, _) = ui.allocate_exact_size(
+                            Vec2::new(ui.available_width(), height),
+                            Sense::hover(),
+                        );
+                        let mut positions = HashMap::new();
+                        let service_width = (area.width() * 0.21).max(100.0);
+                        let pod_width = (area.width() * 0.285).max(110.0);
+                        let left = area.left() + area.width() * 0.077;
+                        let right = area.left() + area.width() * 0.566;
+                        for (column, x, width, tile_height, name) in [
+                            (&sources, left, service_width, 55.0, "Services"),
+                            (&targets, right, pod_width, 39.0, "Pods"),
+                        ] {
+                            ui.painter().text(
+                                egui::pos2(x, area.top() + 8.0),
+                                Align2::LEFT_TOP,
+                                name,
+                                FontId::proportional(13.0),
+                                muted(),
+                            );
+                            for (position, id) in column.iter().enumerate() {
+                                let spacing = (height - 47.0) / column.len().max(1) as f32;
+                                let y = area.top() + 37.0 + (position as f32 + 0.5) * spacing;
+                                positions.insert(
+                                    *id,
+                                    Rect::from_min_size(
+                                        egui::pos2(x, y - tile_height * 0.5),
+                                        Vec2::new(width, tile_height),
+                                    ),
+                                );
+                            }
+                        }
+                        for edge in edges {
+                            let from = positions[&edge.from].right_center();
+                            let to = positions[&edge.to].left_center();
+                            let middle = egui::lerp(from.x..=to.x, 0.45);
+                            ui.painter().add(egui::Shape::line(
+                                vec![
+                                    from,
+                                    egui::pos2(middle, from.y),
+                                    egui::pos2(middle, to.y),
+                                    to,
+                                ],
+                                Stroke::new(
+                                    1.0_f32,
+                                    crate::theme::tone(
+                                        Color32::from_rgb(155, 175, 195),
+                                        Color32::from_rgb(117, 141, 166),
+                                    ),
+                                ),
+                            ));
+                            ui.painter()
+                                .circle_filled(egui::pos2(middle, from.y), 2.0, muted());
+                        }
+                        let mut selected = None;
+                        for (id, tile) in positions {
+                            let item = &graph.nodes[id];
+                            let Some(resource) = item.detail else {
+                                continue;
+                            };
+                            let warning = resource.kind == "Pod"
+                                && !matches!(resource.status.as_str(), "Running" | "Succeeded");
+                            let hit = ui
+                                .interact(tile, ui.id().with(id), Sense::click())
+                                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                .on_hover_text(format!("{}/{}", item.scope, item.name));
+                            hit.widget_info(|| {
+                                egui::WidgetInfo::labeled(egui::WidgetType::Button, true, item.name)
+                            });
+                            if hit.clicked() {
+                                selected = Some(resource.clone());
+                            }
+                            let fill = if hit.hovered() || hit.has_focus() {
+                                selection()
+                            } else if warning {
+                                crate::theme::warning_fill()
+                            } else {
+                                panel()
+                            };
+                            ui.painter().rect(
+                                tile,
+                                6.0,
+                                fill,
+                                Stroke::new(1.0_f32, border()),
+                                egui::StrokeKind::Inside,
+                            );
+                            let painter = ui
+                                .painter()
+                                .with_clip_rect(tile.shrink2(Vec2::new(3.0, 1.0)));
+                            let service = item.kind == "Service";
+                            crate::nav_icon(
+                                &painter,
+                                tile.left_center() + Vec2::new(22.0, 0.0),
+                                if service { "network" } else { "cluster" },
+                                if warning { orange() } else { blue() },
+                            );
+                            let color = if warning { orange() } else { text_color() };
+                            let caption = tile.left_center()
+                                + Vec2::new(40.0, if service { -8.0 } else { 0.0 });
+                            painter.text(
+                                caption,
+                                Align2::LEFT_CENTER,
+                                item.name,
+                                if service {
+                                    crate::theme::semibold(13.0)
+                                } else {
+                                    FontId::proportional(13.0)
+                                },
+                                color,
+                            );
+                            if service {
+                                let ports = crate::service_ports(&resource.raw)
+                                    .map(|(number, port)| {
+                                        format!(
+                                            "{number}/{}",
+                                            port["protocol"].as_str().unwrap_or("TCP")
+                                        )
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join(", ");
+                                let summary =
+                                    format!("{} · {}", crate::service_type(&resource.raw), ports);
+                                painter.text(
+                                    caption + Vec2::new(0.0, 18.0),
+                                    Align2::LEFT_CENTER,
+                                    summary,
+                                    FontId::monospace(11.0),
+                                    muted(),
+                                );
+                            } else {
+                                painter.circle_filled(
+                                    tile.right_center() - Vec2::new(14.0, 0.0),
+                                    3.0,
+                                    if warning { orange() } else { green() },
+                                );
+                            }
+                        }
+                        selected
+                    })
+                    .inner;
+                ui.separator();
+                ui.horizontal(|ui| {
+                    for (icon, label, color) in [
+                        ("network", "Service", blue()),
+                        ("cluster", "Pod", blue()),
+                        ("warning", "Needs attention", orange()),
+                    ] {
+                        let (rect, _) =
+                            ui.allocate_exact_size(Vec2::new(15.0, 19.0), Sense::hover());
+                        crate::nav_icon(ui.painter(), rect.center(), icon, color);
+                        ui.colored_label(muted(), RichText::new(label).size(12.0));
+                    }
+                });
+                selection
+            })
+            .inner
+    }
+
+    fn draw_graph(
+        camera: &mut Camera,
+        resource_query: &mut String,
+        ui: &mut egui::Ui,
+        graph: &Graph<'_>,
+        empty: &str,
+    ) -> Option<Resource> {
+        let mut selected = None;
+        if graph.nodes.iter().any(|node| node.detail.is_some()) {
+            egui::ComboBox::from_id_salt("graph-resource-finder")
+                .selected_text("Find a resource")
+                .width(208.0)
+                .show_ui(ui, |ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(resource_query)
+                            .hint_text("Filter by name, kind, or namespace"),
+                    );
+                    let query = resource_query.trim().to_lowercase();
+                    let mut matches = 0;
+                    for item in &graph.nodes {
+                        let Some(resource) = item.detail else {
+                            continue;
+                        };
+                        if ![item.name, item.kind, item.scope]
+                            .iter()
+                            .any(|text| text.to_lowercase().contains(&query))
+                        {
+                            continue;
+                        }
+                        matches += 1;
+                        let label = format!("{} · {} · {}", item.kind, item.name, item.scope);
+                        if ui.selectable_label(false, label).clicked() {
+                            selected = Some(resource.clone());
+                            ui.close_menu();
+                        }
+                    }
+                    if matches == 0 {
+                        ui.label("No matching resources.");
+                    }
+                });
+            ui.add_space(6.0);
+        }
+        let clicked = camera.draw(ui, graph, empty);
+        selected.or(clicked)
     }
 }
 
@@ -209,7 +520,7 @@ impl<'a> Graph<'a> {
             .collect();
         let mut indices = HashMap::new();
         let mut column = 0;
-        for (kind, color) in TOPOLOGY_GROUPS {
+        for (kind, color) in topology_groups() {
             let items: Vec<_> = resources
                 .iter()
                 .copied()
@@ -345,7 +656,7 @@ impl<'a> Graph<'a> {
         let mut graph = Self::default();
         let mut indices = HashMap::new();
         let mut first_column = 0;
-        for (column, kind, color) in [(0, "Workload", PURPLE), (1, "Service", BLUE)] {
+        for (column, kind, color) in [(0, "Workload", purple()), (1, "Service", blue())] {
             let entries: BTreeSet<_> = flows
                 .iter()
                 .map(|flow| {
@@ -452,10 +763,10 @@ impl Camera {
         let painter = ui.painter().with_clip_rect(rect);
         let mut backdrop = Mesh::default();
         for (corner, color) in [
-            (rect.left_top(), Color32::from_rgb(24, 36, 54)),
-            (rect.right_top(), CANVAS),
-            (rect.right_bottom(), Color32::from_rgb(19, 27, 43)),
-            (rect.left_bottom(), CANVAS),
+            (rect.left_top(), side()),
+            (rect.right_top(), panel()),
+            (rect.right_bottom(), side()),
+            (rect.left_bottom(), panel()),
         ] {
             backdrop.colored_vertex(corner, color);
         }
@@ -465,23 +776,23 @@ impl Camera {
         painter.rect_stroke(
             rect,
             0.0,
-            Stroke::new(1.0_f32, BORDER),
+            Stroke::new(1.0_f32, border()),
             egui::StrokeKind::Inside,
         );
         if graph.nodes.is_empty() {
             let center = rect.center();
-            painter.circle_filled(center - Vec2::new(0.0, 24.0), 16.0, BORDER);
+            painter.circle_filled(center - Vec2::new(0.0, 24.0), 16.0, border());
             painter.circle_stroke(
                 center - Vec2::new(0.0, 24.0),
                 5.0,
-                Stroke::new(1.5_f32, BLUE),
+                Stroke::new(1.5_f32, blue()),
             );
             painter.text(
                 center + Vec2::new(0.0, 12.0),
                 Align2::CENTER_CENTER,
                 empty,
                 FontId::proportional(15.0),
-                TEXT,
+                text_color(),
             );
             return None;
         }
@@ -514,13 +825,24 @@ impl Camera {
         for (point, _) in &projected {
             bounds.extend_with(pos(*point));
         }
-        let padded = bounds.expand2(Vec2::new(TILE.x / 2.0 + 20.0, TILE.y / 2.0 + 42.0));
-        let scale = (rect.width() / padded.width())
-            .min(rect.height() / padded.height())
+        // Fit tiles within the drawable region, excluding the footer and its padding.
+        let graph_rect = Rect::from_min_max(rect.min, rect.max - Vec2::new(0.0, 30.0));
+        let usable = graph_rect.shrink(12.0).size();
+        let fit = |space: f32, span: f32, tile: f32| {
+            let proportional = space / (span + tile);
+            if span > 0.0 {
+                proportional.min((space - tile * 0.25).max(1.0) / span)
+            } else {
+                proportional
+            }
+        };
+        let scale = fit(usable.x, bounds.width(), TILE.x)
+            .min(fit(usable.y, bounds.height(), TILE.y))
             .min(1.15)
             * self.zoom;
-        let to_screen =
-            |point: Vec2| rect.center() + self.pan + (point - bounds.center().to_vec2()) * scale;
+        let to_screen = |point: Vec2| {
+            graph_rect.center() + self.pan + (point - bounds.center().to_vec2()) * scale
+        };
         let floor = |point| to_screen(self.project(point).0);
         let width = graph
             .nodes
@@ -532,7 +854,7 @@ impl Camera {
             .iter()
             .map(|node| node.point.z.abs())
             .fold(0.0, f32::max);
-        let grid = Stroke::new(1.0_f32, BORDER.gamma_multiply(0.50));
+        let grid = Stroke::new(1.0_f32, border().gamma_multiply(0.50));
         for x in (0..=(width / 72.0).ceil() as i32 + 2).map(|index| index as f32 * 72.0 - 72.0) {
             painter.line_segment(
                 [
@@ -572,7 +894,6 @@ impl Camera {
             .iter()
             .map(|(point, _)| to_screen(*point))
             .collect();
-        let graph_rect = Rect::from_min_max(rect.min, rect.max - Vec2::new(0.0, 30.0));
         let tile_scale = scale.clamp(0.25, 1.4);
         let tiles: Vec<_> = centers
             .iter()
@@ -655,7 +976,7 @@ impl Camera {
                         Align2::CENTER_BOTTOM,
                         format!("{rate:.2} req/s"),
                         FontId::monospace(10.0),
-                        TEXT,
+                        text_color(),
                     );
                 }
                 ui.ctx().request_repaint_after(Duration::from_millis(33));
@@ -708,9 +1029,9 @@ impl Camera {
                 tile,
                 9.0,
                 if hovered == Some(index) {
-                    Color32::from_rgb(34, 48, 69)
+                    selection()
                 } else {
-                    Color32::from_rgb(21, 31, 47)
+                    side()
                 },
             );
             painter.rect_stroke(
@@ -720,9 +1041,21 @@ impl Camera {
                 egui::StrokeKind::Inside,
             );
 
-            let icon = Pos2::new(tile.left() + 23.0 * tile_scale, center.y);
-            painter.circle_filled(icon, 12.0 * tile_scale, accent.gamma_multiply(0.18));
-            if scale >= 0.38 {
+            if tile_scale < 0.72 {
+                let mut title = LayoutJob::simple_singleline(
+                    item.name.into(),
+                    FontId::proportional(10.0),
+                    text_color(),
+                );
+                title.wrap.max_width = (tile.width() - 8.0).max(1.0);
+                title.wrap.max_rows = 1;
+                title.wrap.break_anywhere = true;
+                let label = painter.with_clip_rect(hit);
+                let galley = label.layout_job(title);
+                label.galley(center - galley.size() * 0.5, galley, text_color());
+            } else {
+                let icon = Pos2::new(tile.left() + 23.0 * tile_scale, center.y);
+                painter.circle_filled(icon, 12.0 * tile_scale, accent.gamma_multiply(0.18));
                 painter.text(
                     icon,
                     Align2::CENTER_CENTER,
@@ -742,14 +1075,14 @@ impl Camera {
                 let mut title = LayoutJob::simple_singleline(
                     item.name.into(),
                     FontId::proportional(13.5 * tile_scale),
-                    TEXT.gamma_multiply(if related[index] { 1.0 } else { 0.58 }),
+                    text_color().gamma_multiply(if related[index] { 1.0 } else { 0.58 }),
                 );
                 title.wrap.max_width = (tile.right() - x - 10.0 * tile_scale).max(1.0);
                 title.wrap.max_rows = 1;
                 title.wrap.break_anywhere = true;
                 let galley = label.layout_job(title);
                 let y = center.y + 8.0 * tile_scale - galley.size().y * 0.5;
-                label.galley(Pos2::new(x, y), galley, TEXT);
+                label.galley(Pos2::new(x, y), galley, text_color());
             }
             if let Some(resource) = item.detail {
                 let status = super::status_color(&resource.status);
@@ -768,10 +1101,10 @@ impl Camera {
             Pos2::new(rect.left(), rect.bottom() - 30.0),
             rect.right_bottom(),
         );
-        painter.rect_filled(footer, 0.0, CANVAS);
+        painter.rect_filled(footer, 0.0, panel());
         painter.line_segment(
             [footer.left_top(), footer.right_top()],
-            Stroke::new(1.0_f32, BORDER),
+            Stroke::new(1.0_f32, border()),
         );
         painter.text(
             footer.left_center() + Vec2::new(12.0, 0.0),
@@ -782,14 +1115,14 @@ impl Camera {
                 graph.links.len()
             ),
             FontId::proportional(11.0),
-            MUTED,
+            muted(),
         );
         painter.text(
             footer.right_center() - Vec2::new(12.0, 0.0),
             Align2::RIGHT_CENTER,
             "Drag to rotate  ·  Shift-drag to pan  ·  Scroll to zoom",
             FontId::proportional(11.0),
-            MUTED,
+            muted(),
         );
         selected
     }
@@ -892,7 +1225,10 @@ pub(super) fn prometheus_port(service: &Resource) -> Option<String> {
             .iter()
             .find(|p| matches!(p["name"].as_str(), Some("http" | "http-web" | "web")))
     })?;
-    port["name"].as_str().filter(|name| !name.is_empty()).map(str::to_owned)
+    port["name"]
+        .as_str()
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
         .or_else(|| port["port"].as_u64().map(|number| number.to_string()))
 }
 

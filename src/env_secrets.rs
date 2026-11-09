@@ -69,6 +69,18 @@ impl EnvSecrets {
 
     pub fn show_data(&mut self, ui: &mut egui::Ui, target: Option<&Target>, secret: &Resource) {
         let Some(target) = target else {
+            if let Some(values) = secret.raw.get("data").filter(|value| value.is_object()) {
+                // Local sample values use the same Base64/decode UI as fetched values.
+                let id = ui.make_persistent_id(("sample-secret-data", &secret.namespace, &secret.name));
+                let request = self.details.entry(id).or_insert_with(|| Request {
+                    pending: mpsc::channel().1,
+                    seen: true,
+                    value: Some(Ok(SecretData { encoded: serde_json::from_value(values.clone()).unwrap_or_default(), decoded: HashMap::new() })),
+                });
+                request.seen = true;
+                if let Some(Ok(data)) = &mut request.value { data.show(ui); }
+                return;
+            }
             ui.label("Connect to a cluster to read Secret data.");
             return;
         };
@@ -114,7 +126,7 @@ impl EnvSecrets {
                 });
             }
             Some(Err(error)) => {
-                ui.colored_label(crate::ORANGE, error.as_str());
+                ui.colored_label(crate::orange(), error.as_str());
                 if ui.button("Retry").clicked() {
                     self.details.remove(&id);
                     ui.ctx().request_repaint();
@@ -182,12 +194,12 @@ impl EnvSecrets {
                     ui.spinner();
                 }
                 Some(Err(error)) => {
-                    ui.colored_label(crate::ORANGE, error);
+                    ui.colored_label(crate::orange(), error);
                 }
                 Some(Ok(value)) => {
                     let value = if value.is_empty() { "(empty)" } else { value };
                     ui.add(
-                        egui::Label::new(egui::RichText::new(value).color(crate::MUTED))
+                        egui::Label::new(egui::RichText::new(value).color(crate::muted()))
                             .wrap()
                             .selectable(true),
                     );
@@ -228,7 +240,7 @@ impl SecretData {
         for (key, encoded) in &self.encoded {
             ui.push_id(key, |ui| {
                 ui.horizontal_wrapped(|ui| {
-                    ui.colored_label(crate::MUTED, key);
+                    ui.colored_label(crate::muted(), key);
                     let shown = self.decoded.contains_key(key);
                     let hint = if shown { "Show Base64 for" } else { "Decode" };
                     if eye(ui, true, shown, &format!("{hint} {key}")) {
@@ -242,19 +254,19 @@ impl SecretData {
                 let value = match self.decoded.get(key) {
                     Some(Ok(Some(value))) => value,
                     Some(Ok(None)) => {
-                        ui.colored_label(crate::MUTED, "Binary data · shown as Base64");
+                        ui.colored_label(crate::muted(), "Binary data · shown as Base64");
                         encoded
                     }
                     Some(Err(error)) => {
-                        ui.colored_label(crate::ORANGE, error);
+                        ui.colored_label(crate::orange(), error);
                         encoded
                     }
                     None => encoded,
                 };
                 let value = if value.is_empty() { "(empty)" } else { value };
                 egui::Frame::new()
-                    .fill(crate::BG)
-                    .stroke(egui::Stroke::new(1.0_f32, crate::BORDER))
+                    .fill(crate::bg())
+                    .stroke(egui::Stroke::new(1.0_f32, crate::border()))
                     .corner_radius(3.0)
                     .inner_margin(7.0)
                     .show(ui, |ui| {

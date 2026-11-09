@@ -1,7 +1,7 @@
 use super::{
-    card, detail_metrics, egui, event_for, event_message, event_object, is_master, now,
-    relative_age, resource_quantity, text, Align, Color32, Resource, RichText, Sample, Sense,
-    Snapshot, Stroke, Vec2, BLUE, BORDER, GREEN, MUTED, ORANGE, PURPLE, REFRESH, SIDE,
+    blue, border, card, detail_metrics, egui, event_for, event_message, event_object, green,
+    is_master, muted, now, orange, purple, relative_age, resource_quantity, side, text, Align,
+    Color32, Resource, RichText, Sample, Sense, Snapshot, Stroke, Vec2, REFRESH,
 };
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -64,6 +64,7 @@ struct Group {
 pub(super) enum Action<'a> {
     Open(&'a Resource),
     Events,
+    Pods,
 }
 
 pub(super) struct Overview {
@@ -146,6 +147,206 @@ impl Overview {
         snapshot: &'a Snapshot,
         demo: bool,
     ) -> Option<Action<'a>> {
+        let warnings = collect_warnings(snapshot);
+        let mut action = None;
+        let mut jump = false;
+        let pods = snapshot.kind("Pod");
+        let nodes = snapshot.kind("Node");
+        if let Some(first) = warnings.first() {
+            let target = first.object_target.unwrap_or(first.resource);
+            let pod_warnings = warnings
+                .iter()
+                .filter(|warning| {
+                    warning
+                        .object_target
+                        .is_some_and(|object| object.kind == "Pod")
+                })
+                .count();
+            let heading = match (pod_warnings, warnings.len()) {
+                (1, 1) => "1 pod needs attention".into(),
+                (pods, count) if pods == count => format!("{pods} pods need attention"),
+                (_, count) => format!("{count} cluster warnings"),
+            };
+            egui::Frame::new()
+                .fill(crate::theme::warning_fill())
+                .corner_radius(7)
+                .inner_margin(egui::Margin::symmetric(20, 12))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        let (icon, _) = ui.allocate_exact_size(Vec2::new(22.0, 46.0), Sense::hover());
+                        crate::nav_icon(ui.painter(), icon.center(), "warning", orange());
+                        ui.vertical(|ui| {
+                            ui.spacing_mut().item_spacing.y = 4.0;
+                            ui.colored_label(orange(), RichText::new(heading).font(crate::theme::semibold(17.0)));
+                            let summary = if demo && target.kind == "Pod" { "payments in production is restarting." } else { &first.message };
+                            ui.colored_label(orange(), RichText::new(summary).size(13.0));
+                        });
+                        ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                            let label = if target.kind == "Pod" {
+                                "Inspect affected pod"
+                            } else {
+                                "Inspect warning"
+                            };
+                            if ui.link(RichText::new(label).color(orange())).clicked() {
+                                action = Some(Action::Open(target));
+                            }
+                            if warnings.len() > 1
+                                && ui
+                                    .link(RichText::new("View warnings").color(orange()))
+                                    .clicked()
+                            {
+                                jump = true;
+                            }
+                        });
+                    });
+                });
+            ui.add_space(11.0);
+        }
+        let group = &self.groups[0];
+        let count = |kind: &str, value: usize, total: usize| {
+            if snapshot.errors.iter().any(|error| error.starts_with(kind)) {
+                "—".into()
+            } else {
+                format!("{value} / {total}")
+            }
+        };
+        let ready = nodes.iter().filter(|node| node.status == "Ready").count();
+        let running = pods
+            .iter()
+            .filter(|pod| pod.raw["status"]["phase"] == "Running")
+            .count();
+        let percent = |index: usize| {
+            ratio(group.totals[index].usage, group.totals[index].allocatable)
+                .map_or_else(|| "—".into(), |value| format!("{:.1}%", value * 100.0))
+        };
+        let capacity = |index: usize, unit: &str| {
+            group.totals[index].allocatable.map_or_else(
+                || "Allocatable capacity unavailable".into(),
+                |value| format!("Of {value:.0} allocatable {unit}"),
+            )
+        };
+        card(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 4.0;
+            ui.columns(4, |columns| {
+                for (column, (label, value, caption, color)) in columns.iter_mut().zip([
+                    (
+                        "Nodes ready",
+                        count("Nodes:", ready, nodes.len()),
+                        "Cluster-wide".into(),
+                        crate::text_color(),
+                    ),
+                    (
+                        "Pods running",
+                        count("Pods:", running, pods.len()),
+                        "Across all namespaces".into(),
+                        crate::text_color(),
+                    ),
+                    ("CPU utilization", percent(0), capacity(0, "cores"), blue()),
+                    (
+                        "Memory utilization",
+                        percent(1),
+                        capacity(1, "GiB"),
+                        purple(),
+                    ),
+                ]) {
+                    column.colored_label(muted(), RichText::new(label).size(13.0));
+                    column.colored_label(color, RichText::new(value).font(crate::theme::semibold(24.0)));
+                    column.colored_label(muted(), RichText::new(caption).size(12.0));
+                }
+            });
+        });
+        ui.add_space(11.0);
+        let end = now();
+        let start = end.saturating_sub(self.range);
+        card(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Resource trends").font(crate::theme::semibold(18.0)));
+                ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                    let range = RANGES
+                        .iter()
+                        .find(|(_, value)| *value == self.range)
+                        .map_or("1h", |(label, _)| *label);
+                    egui::ComboBox::from_id_salt("overview-range")
+                        .selected_text(range)
+                        .show_ui(ui, |ui| {
+                            for (label, range) in RANGES {
+                                ui.selectable_value(&mut self.range, range, label);
+                            }
+                        });
+                    ui.colored_label(purple(), "Memory");
+                    ui.colored_label(blue(), "CPU");
+                });
+            });
+            ui.colored_label(
+                muted(),
+                if demo {
+                    "Illustrative history"
+                } else {
+                    "Usage as a share of allocatable capacity"
+                },
+            );
+            trend_plot(ui, group, start, end, demo);
+        });
+        ui.add_space(10.0);
+        ui.columns(2, |columns| {
+            card(&mut columns[0], |ui| {
+                ui.set_min_height(135.0);
+                ui.label(RichText::new("Node utilization").font(crate::theme::semibold(17.0)));
+                for node in &nodes {
+                    let usage = ratio(
+                        node.cpu,
+                        resource_quantity(&node.raw["status"]["allocatable"]["cpu"], "cpu"),
+                    );
+                    if usage_row(
+                        ui,
+                        &node.name,
+                        usage,
+                        usage.map_or_else(|| "—".into(), |value| format!("{:.0}%", value * 100.0)),
+                    )
+                    .clicked()
+                    {
+                        action = Some(Action::Open(node));
+                    }
+                }
+                if nodes.is_empty() {
+                    ui.colored_label(muted(), "No nodes available.");
+                }
+            });
+            card(&mut columns[1], |ui| {
+                ui.set_min_height(135.0);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Pods by namespace").font(crate::theme::semibold(17.0)));
+                    ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                        if ui.link(RichText::new("View pods").color(blue())).clicked() {
+                            action = Some(Action::Pods);
+                        }
+                    });
+                });
+                let mut by_namespace = std::collections::BTreeMap::new();
+                for pod in &pods {
+                    *by_namespace.entry(pod.namespace.as_str()).or_insert(0) += 1;
+                }
+                let mut by_namespace: Vec<_> = by_namespace.into_iter().collect();
+                by_namespace.sort_by_key(|(namespace, count)| (std::cmp::Reverse(*count), *namespace));
+                for (namespace, count) in by_namespace {
+                    usage_row(
+                        ui,
+                        namespace,
+                        Some(count as f64 / pods.len() as f64),
+                        format!("{count} pods"),
+                    );
+                }
+                if pods.is_empty() {
+                    ui.colored_label(muted(), "No pods available.");
+                }
+            });
+        });
+        egui::CollapsingHeader::new("Capacity details").show(ui, |ui| self.capacity_details(ui));
+        let warning_action = show_warnings(ui, snapshot, warnings, &mut self.warning_sort, jump);
+        action.or(warning_action)
+    }
+
+    fn capacity_details(&mut self, ui: &mut egui::Ui) {
         let mut index = Scope::ALL
             .iter()
             .position(|scope| *scope == self.scope)
@@ -176,27 +377,8 @@ impl Overview {
                         }
                     }
                 });
-            let range_label = RANGES
-                .iter()
-                .find(|(_, range)| *range == self.range)
-                .map_or("1h", |(name, _)| *name);
-            egui::ComboBox::from_id_salt("overview-range")
-                .selected_text(range_label)
-                .show_ui(ui, |ui| {
-                    for (name, range) in RANGES {
-                        ui.selectable_value(&mut self.range, range, name);
-                    }
-                });
             ui.selectable_value(&mut self.memory, false, "CPU");
             ui.selectable_value(&mut self.memory, true, "Memory");
-            ui.colored_label(
-                MUTED,
-                if demo {
-                    "Demo data"
-                } else {
-                    "History collected since connecting"
-                },
-            );
         });
         let group = &self.groups[index];
         let end = now();
@@ -216,6 +398,20 @@ impl Overview {
                 ))
             })
             .collect();
+        let coverage = match (points.first(), points.last()) {
+            (Some(first), Some(last)) if points.len() > 1 => {
+                let seconds = last.0.saturating_sub(first.0);
+                let span = if seconds < 60 {
+                    format!("{seconds}s")
+                } else {
+                    format!("{}m", seconds / 60)
+                };
+                format!("{span} of history · {} samples", points.len())
+            }
+            (Some(_), _) => "1 sample · collecting history".into(),
+            _ => "No samples in this range".into(),
+        };
+        ui.colored_label(muted(), coverage);
         let trend = |ui: &mut egui::Ui| {
             card(ui, |ui| {
                 detail_metrics::chart(ui, &points, start, end, REFRESH, self.memory, 198.0)
@@ -237,9 +433,156 @@ impl Overview {
             trend(ui);
             summaries(ui);
         }
-        ui.add_space(8.0);
-        warnings(ui, snapshot, &mut self.warning_sort)
     }
+}
+
+fn ratio(usage: Option<f64>, capacity: Option<f64>) -> Option<f64> {
+    let capacity = capacity.filter(|value| *value > 0.0)?;
+    Some(usage? / capacity)
+}
+
+fn trend_plot(ui: &mut egui::Ui, group: &Group, start: u64, end: u64, demo: bool) {
+    let series = [false, true].map(|memory| {
+        let total = group.totals[usize::from(memory)];
+        if demo {
+            const CPU: [f64; 18] = [
+                0.90, 1.02, 0.97, 1.19, 1.06, 0.78, 0.73, 0.81, 0.76, 1.07, 1.10, 0.96, 0.80, 0.69,
+                0.79, 1.02, 0.86, 1.00,
+            ];
+            const MEMORY: [f64; 18] = [
+                0.94, 0.97, 0.99, 1.04, 1.07, 1.04, 1.01, 0.97, 0.99, 0.96, 0.96, 0.99, 1.03, 1.05,
+                1.08, 1.04, 1.01, 1.00,
+            ];
+            let samples = if memory { MEMORY } else { CPU };
+            if let Some(value) = ratio(total.usage, total.allocatable) {
+                return samples
+                    .iter()
+                    .enumerate()
+                    .map(|(i, multiplier)| (i as f64 / 17.0, value * multiplier))
+                    .collect::<Vec<_>>();
+            }
+        }
+        let span = end.saturating_sub(start).max(1) as f64;
+        group
+            .history
+            .iter()
+            .filter(|sample| (start..=end).contains(&sample.stamp))
+            .map(|sample| {
+                (
+                    (sample.stamp - start) as f64 / span,
+                    ratio(
+                        if memory { sample.memory } else { sample.cpu },
+                        total.allocatable,
+                    )
+                    .unwrap_or(f64::NAN),
+                )
+            })
+            .collect::<Vec<_>>()
+    });
+    let max = series
+        .iter()
+        .flatten()
+        .map(|(_, value)| *value)
+        .fold(1.0, f64::max);
+    let max = (max * 4.0).ceil() / 4.0;
+    let (area, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 184.0), Sense::hover());
+    let plot = egui::Rect::from_min_max(
+        area.min + Vec2::new(48.0, 9.0),
+        area.max - Vec2::new(18.0, 24.0),
+    );
+    let painter = ui.painter();
+    for mark in 0..=4 {
+        let y = egui::lerp(plot.y_range(), 1.0 - mark as f32 / 4.0);
+        painter.hline(plot.x_range(), y, Stroke::new(1.0_f32, border()));
+        painter.text(
+            egui::pos2(plot.left() - 9.0, y),
+            egui::Align2::RIGHT_CENTER,
+            format!("{:.0}%", max * mark as f64 * 25.0),
+            egui::FontId::proportional(11.0),
+            muted(),
+        );
+        let remaining = end.saturating_sub(start) / 60 * (4 - mark) / 4;
+        let tick = if remaining == 0 {
+            "Now".into()
+        } else if remaining >= 1440 {
+            format!("−{}d", remaining / 1440)
+        } else if remaining >= 60 && remaining % 60 == 0 {
+            format!("−{}h", remaining / 60)
+        } else {
+            format!("−{remaining}m")
+        };
+        painter.text(
+            egui::pos2(
+                egui::lerp(plot.x_range(), mark as f32 / 4.0),
+                plot.bottom() + 10.0,
+            ),
+            egui::Align2::CENTER_TOP,
+            tick,
+            egui::FontId::proportional(11.0),
+            muted(),
+        );
+    }
+    if !series.iter().flatten().any(|(_, value)| value.is_finite()) {
+        painter.text(
+            plot.center(),
+            egui::Align2::CENTER_CENTER,
+            "No utilization samples in this range",
+            egui::FontId::proportional(13.0),
+            muted(),
+        );
+    }
+    for (points, color) in series.into_iter().zip([blue(), purple()]) {
+        for segment in points
+            .split(|(_, value)| !value.is_finite())
+            .filter(|segment| !segment.is_empty())
+        {
+            let points: Vec<_> = segment
+                .iter()
+                .map(|(x, y)| {
+                    egui::pos2(
+                        egui::lerp(plot.x_range(), *x as f32),
+                        egui::lerp(plot.y_range(), 1.0 - (*y / max) as f32),
+                    )
+                })
+                .collect();
+            if points.len() == 1 {
+                painter.circle_filled(points[0], 2.5, color);
+            } else {
+                painter.add(egui::Shape::line(points, Stroke::new(1.6_f32, color)));
+            }
+        }
+    }
+}
+
+fn usage_row(
+    ui: &mut egui::Ui,
+    label: &str,
+    fraction: Option<f64>,
+    value: String,
+) -> egui::Response {
+    ui.horizontal(|ui| {
+        let width = ui.available_width();
+        let response = ui
+            .add_sized(
+                [width * 0.25, 22.0],
+                egui::Label::new(label).truncate().sense(Sense::click()),
+            )
+            .on_hover_text(label);
+        let (track, _) =
+            ui.allocate_exact_size(Vec2::new((width * 0.53).max(1.0), 7.0), Sense::hover());
+        ui.painter()
+            .rect_filled(track, 3.5, crate::theme::selection());
+        if let Some(value) = fraction {
+            let fill = egui::Rect::from_min_size(
+                track.min,
+                Vec2::new(track.width() * value.clamp(0.0, 1.0) as f32, track.height()),
+            );
+            ui.painter().rect_filled(fill, 3.5, blue());
+        }
+        ui.colored_label(muted(), RichText::new(value).size(12.0));
+        response
+    })
+    .inner
 }
 
 fn summarize(nodes: &[&Resource], pods: &[&Resource], complete_pods: bool) -> [Totals; 3] {
@@ -320,15 +663,15 @@ fn summary_card(ui: &mut egui::Ui, index: usize, totals: Totals) {
     });
     let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 104.0), Sense::hover());
     let painter = ui.painter();
-    let usage_color = if index == 2 { GREEN } else { PURPLE };
+    let usage_color = if index == 2 { green() } else { purple() };
     let denominator = totals
         .capacity
         .or(totals.allocatable)
         .filter(|value| *value > 0.0);
     let tracks = [
         (totals.usage, usage_color),
-        (totals.requests, GREEN),
-        (totals.limits, BLUE),
+        (totals.requests, green()),
+        (totals.limits, blue()),
     ];
     for (ring, &(value, color)) in tracks
         .iter()
@@ -336,7 +679,7 @@ fn summary_card(ui: &mut egui::Ui, index: usize, totals: Totals) {
         .enumerate()
     {
         let radius = 44.0 - ring as f32 * 7.0;
-        painter.circle_stroke(rect.center(), radius, Stroke::new(4.0_f32, BORDER));
+        painter.circle_stroke(rect.center(), radius, Stroke::new(4.0_f32, border()));
         if let Some((value, total)) = value.zip(denominator) {
             let fraction = (value / total).clamp(0.0, 1.0) as f32;
             if fraction == 0.0 {
@@ -365,8 +708,8 @@ fn summary_card(ui: &mut egui::Ui, index: usize, totals: Totals) {
     };
     let labels = [
         ("Usage", totals.usage, usage_color),
-        ("Requests", totals.requests, GREEN),
-        ("Limits", totals.limits, BLUE),
+        ("Requests", totals.requests, green()),
+        ("Limits", totals.limits, blue()),
         (
             "Allocatable Capacity",
             totals.allocatable,
@@ -504,12 +847,13 @@ fn collect_warnings(snapshot: &Snapshot) -> Vec<Warning<'_>> {
 
 const WARNING_WIDTHS: [f32; 4] = [0.65, 0.17, 0.10, 0.08];
 
-fn warnings<'a>(
+fn show_warnings<'a>(
     ui: &mut egui::Ui,
     snapshot: &'a Snapshot,
+    mut warnings: Vec<Warning<'a>>,
     sort: &mut Option<(usize, bool)>,
+    jump: bool,
 ) -> Option<Action<'a>> {
-    let mut warnings = collect_warnings(snapshot);
     if let Some((column, descending)) = *sort {
         warnings.sort_by(|left, right| {
             let order = match column {
@@ -528,12 +872,19 @@ fn warnings<'a>(
     let mut action = None;
     card(ui, |ui| {
         ui.horizontal(|ui| {
-            ui.label(
+            let heading = ui.label(
                 RichText::new(format!("Warnings: {}", warnings.len()))
                     .strong()
                     .size(16.0)
-                    .color(if warnings.is_empty() { MUTED } else { ORANGE }),
+                    .color(if warnings.is_empty() {
+                        muted()
+                    } else {
+                        orange()
+                    }),
             );
+            if jump {
+                heading.scroll_to_me(Some(Align::Min));
+            }
             ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
                 if ui.link("All events →").clicked() {
                     action = Some(Action::Events);
@@ -545,11 +896,11 @@ fn warnings<'a>(
             .iter()
             .any(|error| error.starts_with("Events:"));
         if partial_events {
-            ui.colored_label(MUTED, "Some cluster events are unavailable.");
+            ui.colored_label(muted(), "Some cluster events are unavailable.");
         }
         if warnings.is_empty() {
             if !partial_events {
-                ui.colored_label(MUTED, "No warnings reported.");
+                ui.colored_label(muted(), "No warnings reported.");
             }
             return;
         }
@@ -645,7 +996,7 @@ fn warning_row<'a>(
                     let is_link = index == 1 && target.is_some();
                     let mut caption = RichText::new(cell);
                     if is_link {
-                        caption = caption.color(BLUE).underline();
+                        caption = caption.color(blue()).underline();
                     }
                     if message_target.is_none() {
                         caption = caption.strong();
@@ -677,7 +1028,7 @@ fn warning_row<'a>(
         ui.painter().hline(
             response.rect.x_range(),
             response.rect.bottom(),
-            Stroke::new(1.0_f32, SIDE),
+            Stroke::new(1.0_f32, side()),
         );
     }
     selected
