@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.11 · 2026-11-09
+
+- Show environment values and their sources in Pod and workload container details.
+
 ## 0.1.10 · 2026-11-09
 
 - Added Kubernetes settings for adding or pasting kubeconfigs and syncing folders into the sidebar.

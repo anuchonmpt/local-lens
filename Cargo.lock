@@ -623,7 +623,7 @@ dependencies = [
 
 [[package]]
 name = "cluster-observatory"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "eframe",
  "image",
