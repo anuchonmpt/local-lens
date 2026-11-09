@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.18 · 2026-11-09
+
+- Give the resource details scrollbar its own space so it cannot cover Secret reveal buttons.
+
 ## 0.1.17 · 2026-11-09
 
 - Open Check Update and View Changelog from the version menu. When an update is available, install it, skip that version, or cancel.

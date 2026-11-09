@@ -1119,6 +1119,8 @@ impl Observatory {
                 if self.selected.is_none() { return; }
 
                 let scroll_key = (&resource.kind, &resource.namespace, &resource.name, &self.detail_tab);
+                // Keep the drawer scrollbar outside the resource controls' hit area.
+                ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
                 egui::ScrollArea::vertical().id_salt(scroll_key).auto_shrink([false, false]).show(ui, |ui| {
                     match self.detail_tab.as_str() {
                         "Configuration" => {
@@ -2545,6 +2547,62 @@ fn dragging_a_resource_header_resizes_without_sorting() {
     assert!((row_right(&resized) - row_right(&first)).abs() < 1.0);
     assert!(app.table_widths.contains_key(&("Deployment", ResourceColumn::Name)));
     assert!(app.table_sort.is_empty());
+}
+
+#[cfg(test)]
+#[test]
+fn details_scrollbar_leaves_room_for_a_secret_eye() {
+    let ctx = egui::Context::default();
+    let creation = eframe::CreationContext::_new_kittest(ctx.clone());
+    let mut app = Observatory::new(&creation, Some(PathBuf::from("test.png")), None);
+    app.target = Some(Target { exe: "/usr/bin/false".into(), ..Default::default() });
+    ctx.style_mut(|style| style.animation_time = 0.0);
+    let mut env = vec![json!({
+        "name": "LONG_ENVIRONMENT_VARIABLE",
+        "valueFrom": { "secretKeyRef": {
+            "name": "a-long-secret-name-used-to-check-wrapping",
+            "key": "token",
+        }},
+    })];
+    env.extend((0..30).map(|index| json!({"name":format!("VAR_{index}"), "value":"fixture"})));
+    app.selected = Some(Resource::parse(json!({
+        "kind": "Pod",
+        "metadata": {"name":"app", "namespace":"test"},
+        "spec": {"containers":[{"name":"app", "env":env}]},
+    })));
+    let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(480.0, 1000.0));
+    let mut frame = |events| {
+        ctx.run(egui::RawInput { screen_rect: Some(screen), events, ..Default::default() }, |ctx| {
+            app.details(ctx);
+        })
+    };
+    let expander = frame(vec![]).shapes.into_iter().find_map(|shape| match shape.shape {
+        egui::Shape::Text(text) if text.galley.text() == "31 variables" => {
+            Some(text.pos + text.galley.size() / 2.0)
+        }
+        _ => None,
+    }).expect("environment expander");
+    let button = |pressed| egui::Event::PointerButton {
+        pos: expander, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE,
+    };
+    frame(vec![egui::Event::PointerMoved(expander), button(true)]);
+    frame(vec![button(false)]);
+    let output = frame(vec![]);
+    let (eye, clip) = output.shapes.iter().find_map(|shape| match &shape.shape {
+        egui::Shape::Circle(circle) if (circle.radius - 1.8).abs() < 0.01 => {
+            Some((circle.center, shape.clip_rect))
+        }
+        _ => None,
+    }).expect("Secret eye");
+    let track = output.shapes.iter().find_map(|shape| match &shape.shape {
+        egui::Shape::Rect(rect) if rect.fill == ctx.style().visuals.extreme_bg_color
+            && rect.rect.height() > 300.0 && rect.rect.width() < 12.0 => Some(rect.rect),
+        _ => None,
+    }).expect("drawer scrollbar track");
+    assert!(clip.contains(eye + Vec2::new(7.0, 0.0)), "eye {eye:?}, clip {clip:?}, track {track:?}");
+    assert!(eye.x + 9.5 < track.left());
+    let hovered = frame(vec![egui::Event::PointerMoved(eye)]);
+    assert_eq!(hovered.platform_output.cursor_icon, egui::CursorIcon::PointingHand);
 }
 
 #[cfg(test)]
