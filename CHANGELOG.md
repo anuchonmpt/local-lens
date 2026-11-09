@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.9 · 2026-11-09
+
+- Use the Cluster Observatory icon in the Dock while the app is running.
+
 ## 0.1.8 · 2026-11-09
 
 - Fixed the green update arrow in the footer appearing as a square on some displays.

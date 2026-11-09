@@ -2278,7 +2278,26 @@ fn main()->eframe::Result {
         std::process::exit(2);
     }
     let target = (!target.context.is_empty()).then_some(target);
-    let options=eframe::NativeOptions{viewport:egui::ViewportBuilder::default().with_title("Cluster Observatory").with_inner_size([1440.0,960.0]).with_min_inner_size([1080.0,720.0]),..Default::default()};
+    let icon = image::load_from_memory_with_format(
+        include_bytes!("../assets/app-icon.png"),
+        image::ImageFormat::Png,
+    )
+    .expect("valid bundled app icon")
+    .resize(256, 256, image::imageops::FilterType::Triangle)
+    .into_rgba8();
+    let (width, height) = icon.dimensions();
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_title("Cluster Observatory")
+            .with_inner_size([1440.0, 960.0])
+            .with_min_inner_size([1080.0, 720.0])
+            .with_icon(egui::IconData {
+                rgba: icon.into_raw(),
+                width,
+                height,
+            }),
+        ..Default::default()
+    };
     eframe::run_native("Cluster Observatory",options,Box::new(move|cc|Ok(Box::new(Observatory::new(cc,shot,target)))))
 }
 
