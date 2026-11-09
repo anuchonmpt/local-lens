@@ -9,6 +9,8 @@ mod workloads_overview;
 mod detail_metrics;
 #[cfg(target_os = "macos")]
 mod process_usage;
+#[cfg(target_os = "macos")]
+mod updates;
 mod resource_details;
 mod visualize;
 use kubernetes::{LocalContexts, Stream, Target};
@@ -357,6 +359,8 @@ struct Observatory {
     detail_metrics: detail_metrics::Metrics,
     #[cfg(target_os = "macos")]
     process_usage: process_usage::ProcessUsage,
+    #[cfg(target_os = "macos")]
+    updates: updates::Updates,
     manifest: Option<Manifest>,
     container: String,
     pod_logs: Option<PodLogs>,
@@ -388,6 +392,8 @@ impl Observatory {
             target: None, fetch_cancel: None, repaint: cc.egui_ctx.clone(), visualize: Default::default(), detail_metrics: Default::default(), manifest: None, container: String::new(),
             #[cfg(target_os = "macos")]
             process_usage: Default::default(),
+            #[cfg(target_os = "macos")]
+            updates: Default::default(),
             pod_logs: None, forwards: Vec::new(), local_port: 8080, remote_port: 80,
             table_sort: HashMap::new(),
             table_widths, table_widths_dir, pending_table_width: None,
@@ -617,6 +623,8 @@ impl Observatory {
         badge(ui,if self.demo{"SAMPLE DATA"}else if self.snapshot.loaded > 0 {"KUBERNETES"} else if self.busy {"CONNECTING"} else if self.target.is_none() {"DISCONNECTED"} else {"UNAVAILABLE"},if self.demo{ORANGE}else{BLUE});
         ui.with_layout(egui::Layout::right_to_left(Align::Center),|ui|{
             if ui.button("Connections").clicked(){self.connections=true;}
+            #[cfg(target_os = "macos")]
+            if ui.button(concat!("Updates · v", env!("CARGO_PKG_VERSION"))).clicked() { self.updates.open(); }
             if ui.add_enabled(self.target.is_some() && !self.namespace.is_empty() && !self.busy && self.manifest.is_none(), egui::Button::new("Apply YAML…")).clicked() {
                 self.manifest = Some(Manifest { yaml: String::new(), original: None, feedback: String::new() });
             }
@@ -2169,6 +2177,8 @@ impl eframe::App for Observatory {
         });
         self.connections(ctx);
         self.manifest_editor(ctx);
+        #[cfg(target_os = "macos")]
+        self.updates.show(ctx);
         if !ctx.input(|input| input.pointer.primary_down()) {
             self.save_pending_table_width();
         }

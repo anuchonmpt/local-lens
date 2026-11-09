@@ -4,6 +4,21 @@ A Rust/egui desktop workspace for inspecting and operating Kubernetes clusters.
 It includes resource trends, node utilization, and service-to-pod-to-node
 topology.
 
+## Install on macOS
+
+Download the macOS disk image from [GitHub Releases](https://github.com/anuchonmpt/local-lens/releases/latest),
+open it, and drag **Cluster Observatory** into **Applications**. The same download
+supports Apple Silicon and Intel. The app is ad hoc signed and has not been notarized.
+
+Open **Updates** in the toolbar to see the running version, browse version history,
+and check for newer releases. If an update is available, review **What's New**,
+choose **Download and Install**, then select **Restart App**. The app must be in
+a location writable by your account to install updates.
+
+To build the disk image locally, install both Rust targets with
+`rustup target add aarch64-apple-darwin x86_64-apple-darwin` and run
+`./package-macos.sh`. The image is created in `target/dist/`.
+
 ## Run
 
 From this folder:

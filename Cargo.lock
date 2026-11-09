@@ -614,12 +614,15 @@ dependencies = [
 
 [[package]]
 name = "cluster-observatory"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "eframe",
  "image",
+ "libc",
+ "semver",
  "serde_json",
  "serde_yaml_ng",
+ "tempfile",
  "time",
 ]
 
